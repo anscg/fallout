@@ -221,7 +221,9 @@ export default function AdminShopItemsIndex({
                       {item.status === 'available' ? 'Available' : 'Unavailable'}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">{item.orders_count ?? 0}</TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">
+                    {item.orders_count ?? 0}
+                  </TableCell>
                   <TableCell>
                     <ChevronRight className="size-4 text-muted-foreground" />
                   </TableCell>
@@ -254,9 +256,7 @@ export default function AdminShopItemsIndex({
                       <>
                         <div>
                           <p className="font-medium">No shop items yet</p>
-                          <p className="text-sm text-muted-foreground">
-                            Create your first item to start the shop.
-                          </p>
+                          <p className="text-sm text-muted-foreground">Create your first item to start the shop.</p>
                         </div>
                         <Button asChild size="sm">
                           <Link href="/admin/shop_items/new">

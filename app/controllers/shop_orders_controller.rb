@@ -157,8 +157,9 @@ class ShopOrdersController < ApplicationController
     hca_addresses_raw.map { |addr| format_hca_address(addr) }
   end
 
-  # HCA returns the street as line_1 (older records used "address"); fall back so the
-  # street line is never dropped from the display.
+  # HCA returns the street as line_1 (older records used "address") and the phone as
+  # phone_number (older records used "phone"); fall back so neither line is dropped
+  # from the display.
   def format_hca_address(addr)
     [
       [ addr["first_name"], addr["last_name"] ].filter_map(&:presence).join(" ").presence,
@@ -166,7 +167,7 @@ class ShopOrdersController < ApplicationController
       addr["line_2"].presence,
       [ addr["city"], addr["state"], addr["postal_code"] ].filter_map(&:presence).join(", ").presence,
       addr["country"].presence,
-      addr["phone"].presence
+      addr["phone_number"].presence || addr["phone"].presence
     ].compact.join("\n")
   end
 

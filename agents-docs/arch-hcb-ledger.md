@@ -212,6 +212,49 @@ The adjustment form's live "current → projected" preview sums **active cards o
 
 ---
 
+## 4.7. Refunding an Unspent Card Balance Into Koi/Gold
+
+A user spent part of their card and wants the remainder back as **koi/gold** rather than dollars. There is **no automated path** and none is planned — the USD entitlement and the koi ledger are separate systems with separate admin surfaces and separate role gates. Three manual steps, in order.
+
+Structurally this is the same problem as [§4.6](#46-reimbursements-manual-compensation): a fact only a human has (*these returned dollars are being converted, not left spendable*), fixed with the same lever (one `in` / `counts:true` row). It differs in two ways — it spans two admin pages, and the koi figure has to be computed rather than read off HCB.
+
+### Why both halves must be booked
+
+The auto closure refund books `out` / `counts_toward_funding: true`, which **replenishes entitlement** — correct when the money stays in USD (§4), wrong here. Credit the koi without neutralizing that and the same dollars are refunded twice: once as koi, once as spendable funding on the user's next order.
+
+### The three steps
+
+| # | Where | What |
+|---|---|---|
+| 1 | HCB dashboard | Cancel the card (returns full unspent, irreversible) or withdraw part of it. Fallout never initiates this — `HcbService.cancel_card_grant` / `withdraw_card_grant` exist but have **no callers**. |
+| 2 | [adjustments form](../app/controllers/admin/project_grants/adjustments_controller.rb) | **Cancel path:** after the auto-refund lands (≤15 min), book `in` / amount = returned balance / `counts:true`. **Withdrawal path:** nothing auto-books — one `out` / `counts:false` row instead. |
+| 3 | [koi adjustment form](../app/controllers/admin/koi_transactions_controller.rb) | `admin_adjustment` KoiTransaction / GoldTransaction for the prorated units. |
+
+### Prorating the koi/gold
+
+Compute off the order's **frozen** units, never `koi_for_usd_cents` at today's rate — `koi_to_cents_numerator` may have moved since the order was placed.
+
+```
+refund_units = floor((frozen_koi + frozen_gold) × returned_cents ÷ frozen_usd_cents)
+refund_gold  = min(frozen_gold, refund_units)
+refund_koi   = refund_units − refund_gold
+```
+
+- **Floor**, mirroring the ceil-on-charge convention in `HcbGrantSetting#koi_for_usd_cents` — the program never over-refunds in the rounding gap.
+- **Gold first**, the inverse of the koi-first/gold-second charge order: gold is the overflow currency on a mixed order, so it comes back first.
+
+A live calculator implementing this ships inside the runbook `<details>` on [adjustments/new.tsx](../app/frontend/pages/admin/project_grants/adjustments/new.tsx) (`KoiRefundCalculator`).
+
+### Do not reject the order
+
+`fulfilled → rejected` refunds the **entire** `frozen_koi_amount + frozen_gold_amount` (koi is derived live from non-rejected orders) *and* drops `frozen_usd_cents` out of `expected_usd_cents`, cascading into further corrections. The order stays `fulfilled`; the partial refund is expressed as a separate `admin_adjustment` ledger entry.
+
+### Split role gates — the failure mode
+
+Steps 1–2 require `hcb?`; step 3 only requires `admin?` ([`KoiTransactionPolicy#create?`](../app/policies/koi_transaction_policy.rb)). Nothing links the halves, and **no warning fires on a half-finished refund** — a non-hcb admin can credit the koi with the entitlement left standing. The runbooks on both pages cross-link for this reason.
+
+---
+
 ## 5. Divergence Detection
 
 [`ProjectGrantWarning`](../app/models/project_grant_warning.rb) is the surface for ledger anomalies. Detection runs in two places:
@@ -276,6 +319,7 @@ Per [AGENTS.md](../AGENTS.md) and the actual policies:
 | Ratchet uses live HCB data | `ratchet_send_amount!` does NOT rescue Faraday errors — stale data could allow over-sending, so failures abort and let ActiveJob retry. |
 | Closed-card warning ghosts | Unresolved warnings created before closure-refund auto-booking shipped do not auto-resolve. Admins must clear them via the warnings UI. |
 | Reimbursements look like normal cancels | HCB reimbursements cancel the card with no visible signal, so the auto closure refund wrongly replenishes the reimbursed amount. Admin must book a compensating `in`/`counts:true` adjustment after the refund — see §4.6. |
+| Refunding a card balance to koi | Two separate ledgers, two admin pages, two role gates — credit the koi without the `in`/`counts:true` entitlement fix and the same dollars are refunded twice. Prorate off the order's frozen units, not today's rate. See §4.7. |
 
 ---
 

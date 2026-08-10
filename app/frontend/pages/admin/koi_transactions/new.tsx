@@ -81,6 +81,26 @@ export default function AdminKoiTransactionsNew({
         </p>
       </div>
 
+      <details className="rounded-md border border-border bg-muted/30">
+        <summary className="cursor-pointer select-none px-4 py-2 text-sm font-medium">
+          Refunding an unspent project grant card?
+        </summary>
+        <div className="space-y-2 px-4 pb-4 pt-1 text-xs text-muted-foreground">
+          <p>
+            Crediting {unit} here is only <strong>step 3</strong> of that process. The dollars have to come off the card
+            on HCB first, and the user's USD entitlement has to be cancelled on the{' '}
+            <Link href="/admin/project_grants/adjustments/new" className="text-primary hover:underline">
+              grant ledger adjustment page
+            </Link>{' '}
+            — skip that and the same money is refunded twice, once as {unit} and once as spendable funding.
+          </p>
+          <p>
+            That page also carries the full runbook and a calculator for the prorated split. Don't convert the returned
+            dollars at today's rate: prorate off the units the order froze, since the koi rate may have moved since.
+          </p>
+        </div>
+      </details>
+
       {Object.keys(errors).length > 0 && (
         <Alert variant="destructive">
           <AlertDescription>

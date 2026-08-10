@@ -294,12 +294,55 @@ The "$ Issued" summary tile and the per-user adjustment preview both compare an 
 
 The per-card row still **shows** both values — an admin needs to see them — it just doesn't flag them as drift.
 
+### Unissued funds report
+
+[`Admin::ProjectGrants::UnissuedFundsController#index`](../app/controllers/admin/project_grants/unissued_funds_controller.rb) (`/admin/project_grants/unissued_funds`, linked from the orders header) lists users we **owe funding to with no way to deliver it**: `delta_cents > 0` and no order in `pending | on_hold`. Their entitlement only moves when they place a new order, at which point the next card is topped up by more than they requested.
+
+- Users **with** an order awaiting fulfilment are excluded by design — fulfilling it settles the whole delta, so they aren't stuck.
+- `delta > 0` with zero orders is impossible (`expected_usd_cents` sums fulfilled orders), so every row has at least one fulfilled order behind it.
+- The transferred side uses `counts_toward_funding: true` only, mirroring `funding_transferred_usd_cents` — the page agrees with what a future order would actually send.
+- Each row is badged with a **cause**, in priority order: `pending_topup` → `failed_topup` → `card_closed` → `manual_out` → `unknown`. The first two mean the money never left (reconciliation work, also surfaced as warnings); the rest mean it came back and is genuinely just waiting on an order. Detection is note-prefix matching against `HcbGrantCardSyncJob::CLOSURE_REFUND_NOTE_PREFIX` and the adjustments form's `"[Manual adjustment"` prefix — if either prefix changes, this lookup silently degrades to `unknown`.
+- Gated on `hcb?` (`ProjectFundingTopupPolicy#unissued_funds?` / `#refund_to_currency?` / `#issue_funds?`) rather than plain `admin?` — it exposes the same per-user delta figures as the adjustments form, and both row actions write the money ledger.
+- Capped at `ROW_LIMIT` (250) rows sorted by amount owed; the header stats always cover the full set and the UI says so when truncated.
+
+Each row has two ways out, both behind a confirmation dialog that states the exact amounts:
+
+**`#issue_funds`** — enqueues `ProjectFundingTopupJob.perform_later(user.id)` with **no** `triggering_order`. `settle!` already accepts `triggering_order: nil` and `ProjectFundingTopup#project_grant_order` is optional, so this is a new *trigger*, not a new money path: the pending-row outbox, the ratchet cap and the dangling-card guard all still apply. The controller refuses up front when a pending topup exists so the admin gets a readable message instead of a `ReconciliationRequired` job failure.
+
+**`#refund_to_currency`** — converts owed dollars back into koi/gold. **No HCB call:** a positive delta means the dollars are already at the org, which is *why* they're owed. It is the [§4.7](#47-refunding-an-unspent-card-balance-into-koigold) runbook automated at the user level, as one transaction under the `pft:#{user.id}` advisory lock:
+
+1. `ProjectFundingTopup` — `in` / `completed` / `counts_toward_funding: true` for the refunded dollars. Pushes entitlement back down so the balance stops being spendable funding.
+2. `GoldTransaction` then `KoiTransaction` — `admin_adjustment` credits for the split.
+
+Amount is **editable up to the owed balance** (partial refunds allowed, so a user can appear here again for the remainder).
+
+#### Conversion, rounding, and the gold cap
+
+Unlike the manual runbook, this converts at the **current rate**, not the order's frozen rate — the owed balance can span several orders placed at different rates, and a user-level figure has no single frozen rate to prorate against.
+
+```
+units = HcbGrantSetting#refund_units_for_usd_cents(amount_cents)   # floor
+gold  = min(units, refundable_gold)
+koi   = units − gold
+```
+
+- `refund_units_for_usd_cents` **floors** — the deliberate mirror of the **ceil** in `koi_for_usd_cents`. Charging rounds against the user and refunding rounds against them too, so the program never leaks currency on a round trip. A refund small enough to floor to 0 units is rejected rather than silently booking $X for nothing.
+- **Gold comes back before koi**, capped at `refundable_gold` = gold spent on fulfilled orders **minus gold already returned through this flow**. Prior refunds are found by the `CURRENCY_REFUND_PREFIX` (`"[Grant refund]"`) sentinel on the description — without subtracting them, two partial refunds could hand back more gold than the user ever spent. Any remainder above the cap comes back as koi (koi is uncapped; at the current rate a user can receive more koi than they spent if the rate moved in their favour).
+- The frontend `splitRefund` mirrors this exactly for the dialog preview, but the server recomputes from scratch on submit — the client figure is never trusted.
+
+#### Why no idempotency token
+
+The adjustments form uses a one-shot session key; this doesn't need one. The delta is re-derived **inside** the advisory lock and the refund is rejected if it exceeds what's owed — so a double-submit finds the balance already spent and fails on its own. Guards, in order: amount > 0 → still owed → within the owed balance → no pending topup → has a card to book against.
+
+A user with **no card at all** (a fulfilled order whose settle failed before `ensure_active_card!` ran) cannot be refunded — `ProjectFundingTopup` requires the card FK. The button is disabled with that reason, mirroring the adjustments form's refusal. Issue funds still works for them; it creates the card.
+
 ---
 
 ## 7. Access Control (recap)
 
 Per [AGENTS.md](../AGENTS.md) and the actual policies:
 - **Every money-adjacent write is restricted to `user.hcb?`.** The current policies are stricter than the AGENTS.md prose: in `ProjectGrantOrderPolicy`, `update?`/`fulfill?`/`batch_fulfill?`/`reconcile_pending_topup?`/`mark_topup_completed?`/`refund?` are **all** `hcb?`. So the hcb role is required not just to fulfill, but also to edit the admin note or move an order to `pending | on_hold | rejected`. `HcbGrantSettingPolicy#update?` and `ProjectFundingTopupPolicy#new?`/`create?` (manual adjustments) are likewise `hcb?`.
+- `ProjectFundingTopupPolicy#unissued_funds?` / `#refund_to_currency?` / `#issue_funds?` are all `hcb?` — the report exposes per-user delta figures, refunding mints currency against the money ledger, and issuing moves real money (§6).
 - **Regular admins (non-hcb) are view-only** for every money surface — they can read orders, settings, and warnings (`show?`/`index?` are `admin?`), but cannot change order state, edit settings, book adjustments, reconcile, or resolve warnings (`ProjectGrantWarningPolicy#resolve? = hcb?`).
 - HCB-related code changes require **explicit written approval**. No tests or console code against HCB without explicit approval.
 - All financial models are immutable post-resolution: orders cannot be hard-destroyed, completed/failed topups are `readonly?`, settings are singleton and cannot be destroyed. PaperTrail audits all three.
@@ -320,6 +363,8 @@ Per [AGENTS.md](../AGENTS.md) and the actual policies:
 | Closed-card warning ghosts | Unresolved warnings created before closure-refund auto-booking shipped do not auto-resolve. Admins must clear them via the warnings UI. |
 | Reimbursements look like normal cancels | HCB reimbursements cancel the card with no visible signal, so the auto closure refund wrongly replenishes the reimbursed amount. Admin must book a compensating `in`/`counts:true` adjustment after the refund — see §4.6. |
 | Refunding a card balance to koi | Two separate ledgers, two admin pages, two role gates — credit the koi without the `in`/`counts:true` entitlement fix and the same dollars are refunded twice. Prorate off the order's frozen units, not today's rate. See §4.7. |
+| Two refund paths, two rates | The §4.7 manual runbook prorates off the **order's frozen** units (single order, known rate). The unissued-funds button converts at the **current** rate (user-level balance, no single frozen rate). Both floor. Don't copy one's math into the other. |
+| Refund rounding direction | `koi_for_usd_cents` **ceils** (charging), `refund_units_for_usd_cents` **floors** (refunding). Both round against the user on purpose — flipping either leaks currency on a charge/refund round trip. |
 
 ---
 
@@ -341,6 +386,7 @@ Per [AGENTS.md](../AGENTS.md) and the actual policies:
 | User-facing order creation | [app/controllers/project_grants_controller.rb](../app/controllers/project_grants_controller.rb) |
 | Admin orders + warnings | [app/controllers/admin/project_grants/orders_controller.rb](../app/controllers/admin/project_grants/orders_controller.rb) |
 | Admin manual adjustments | [app/controllers/admin/project_grants/adjustments_controller.rb](../app/controllers/admin/project_grants/adjustments_controller.rb) |
+| Unissued funds report | [app/controllers/admin/project_grants/unissued_funds_controller.rb](../app/controllers/admin/project_grants/unissued_funds_controller.rb) |
 | Admin settings | [app/controllers/admin/project_grants/settings_controller.rb](../app/controllers/admin/project_grants/settings_controller.rb) |
 | Donation top-up intent | [app/models/hcb_donation_request.rb](../app/models/hcb_donation_request.rb) |
 | Donation top-up policy | [app/policies/hcb_donation_request_policy.rb](../app/policies/hcb_donation_request_policy.rb) |

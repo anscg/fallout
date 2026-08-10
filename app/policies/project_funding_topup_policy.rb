@@ -5,6 +5,14 @@ class ProjectFundingTopupPolicy < ApplicationPolicy
   # settle flow. Money movement gate: hcb role only.
   def new? = hcb?
   def create? = hcb?
+  # Read-only unissued-funds report. Same hcb gate as the adjustments form: it surfaces
+  # the per-user delta figures that drive money movement, not just order metadata.
+  def unissued_funds? = hcb?
+  # Converts owed funding into koi/gold. Ledger-only (no HCB call — the money is
+  # already back at the org), but it writes the money ledger and mints currency.
+  def refund_to_currency? = hcb?
+  # Pushes owed funding onto the user's card via the settle service. Real money moves.
+  def issue_funds? = hcb?
 
   class Scope < ApplicationPolicy::Scope
     def resolve

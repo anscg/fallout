@@ -510,6 +510,14 @@ Rails.application.routes.draw do
         resources :adjustments, only: [ :new, :create ] do # Manual ledger in/out adjustments (hcb role only)
           collection { get :ledger } # JSON sidecar for live "current → projected" preview on the form
         end
+        # Users owed funding with no order to deliver it (hcb role only). Member :id is a
+        # USER id — the report has no record of its own, each row is a user's delta.
+        resources :unissued_funds, only: [ :index ] do
+          member do
+            post :refund_to_currency # Ledger-only: cancels the entitlement, credits koi/gold
+            post :issue_funds # Enqueues the settle service — moves real money onto the card
+          end
+        end
       end
     end
   end

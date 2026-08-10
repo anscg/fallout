@@ -54,6 +54,14 @@ class HcbGrantSetting < ApplicationRecord
     Rational(usd_cents * koi_to_cents_denominator, koi_to_cents_numerator).ceil
   end
 
+  # Same conversion as koi_for_usd_cents but for money flowing back to the user,
+  # rounded DOWN (floor) — the mirror of the ceil above. Charging rounds against the
+  # user and refunding rounds against them too, so the program never loses currency
+  # in the rounding gap on a round trip.
+  def refund_units_for_usd_cents(usd_cents)
+    Rational(usd_cents * koi_to_cents_denominator, koi_to_cents_numerator).floor
+  end
+
   def hours_for(koi_amount)
     return nil if koi_to_hours_numerator.nil? || koi_to_hours_denominator.nil?
 

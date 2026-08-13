@@ -4,9 +4,9 @@ import { Clock, Lock } from 'lucide-react'
 import Confetti from '@/components/shared/Confetti'
 import { SlidingNumber } from '@/components/shared/SlidingNumber'
 
-// June 20, 2026 11:59 PM America/New_York (EDT, UTC-4) → 2026-06-21T03:59:00Z.
+// August 18, 2026 11:59 PM America/New_York (EDT, UTC-4) → 2026-08-19T03:59:00Z.
 // Hard-coded UTC instant so the countdown is correct regardless of viewer locale.
-const TARGET_UTC = new Date('2026-06-21T03:59:00Z')
+const TARGET_UTC = new Date('2026-08-19T03:59:00Z')
 
 const ONE_HOUR_MS = 60 * 60 * 1000
 const ONE_DAY_MS = 24 * ONE_HOUR_MS

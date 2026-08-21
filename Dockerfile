@@ -19,8 +19,9 @@ WORKDIR /rails
 ARG CURL_VERSION=7.88.1-10+deb12u15
 ARG LIBJEMALLOC2_VERSION=5.3.0-1
 # 8.14.1 satisfies the >= 8.13 floor Active Storage requires to boot (it calls
-# Vips.block_untrusted(true) for CVE-2026-66066). libpoppler-glib8 was dropped
-# alongside PDF screenshot support — that block disables vips's pdfload anyway.
+# Vips.block_untrusted(true) for CVE-2026-66066). No poppler here on purpose: PDF
+# rendering happens only in the worker image, out of process via pdftoppm, and
+# vips's own pdfload stays blocked in both images.
 ARG LIBVIPS42_VERSION=8.14.1-3+deb12u3
 ARG SQLITE3_VERSION=3.40.1-2+deb12u2
 

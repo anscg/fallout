@@ -10,14 +10,21 @@ module ShipChecks
   # quality progressively until it fits the 5MB Airtable attachment cap.
   # Returns JPEG bytes on success, nil on any failure.
   #
-  # Supports raster images handled natively by libvips (PNG/JPG/WEBP/GIF).
-  # PDF and SVG are deliberately unsupported: CVE-2026-66066 (GHSA-xr9x-r78c-5hrm)
-  # made Active Storage call Vips.block_untrusted(true) at boot, which disables
-  # libvips's unfuzzed loaders — pdfload and svgload included — process-wide.
-  # Source files here come from user-controlled repos, so re-enabling them would
-  # reopen arbitrary file disclosure from the worker's environment.
+  # Supports raster images handled natively by libvips (PNG/JPG/WEBP/GIF), plus
+  # PDF by way of ShipChecks::PdfRasterizer.
+  #
+  # libvips never opens a PDF here. Active Storage calls Vips.block_untrusted(true)
+  # for CVE-2026-66066 (GHSA-xr9x-r78c-5hrm), which disables pdfload, and we leave
+  # it disabled. PdfRasterizer renders page 1 in a separate poppler process with an
+  # empty environment, and this module then treats the result as an ordinary PNG.
+  #
+  # SVG stays unsupported. It has no equivalent out-of-process path, and svgload
+  # remains blocked.
   module UnifiedScreenshotProcessor
     MAX_BYTES = 5 * 1024 * 1024
+    # PDFs can be arbitrarily large; cap the input before poppler sees it. 50MB is
+    # generous for a hackathon zine and cheaply rejects a pathological page count.
+    MAX_PDF_INPUT_BYTES = 50 * 1024 * 1024
     # Hard cap on bytes we'll pull from a remote source. download_with_etag bails
     # before reading the body if Content-Length exceeds this, so a malicious or
     # accidental giant file doesn't blow memory.
@@ -34,20 +41,22 @@ module ShipChecks
       "image/png" => ".png",
       "image/jpeg" => ".jpg",
       "image/webp" => ".webp",
-      "image/gif" => ".gif"
+      "image/gif" => ".gif",
+      "application/pdf" => ".pdf"
     }.freeze
 
     SUPPORTED_CONTENT_TYPES = EXT_FOR_CONTENT_TYPE.keys.freeze
 
-    # GitHub raw and many CDNs return application/octet-stream for image files.
-    # When the response content-type isn't one we know how to handle, fall back
-    # to the URL's path extension to identify the format.
+    # GitHub raw and many CDNs return application/octet-stream for files (PDFs in
+    # particular). When the response content-type isn't one we know how to handle,
+    # fall back to the URL's path extension to identify the format.
     CONTENT_TYPE_FROM_EXT = {
       ".png" => "image/png",
       ".jpg" => "image/jpeg",
       ".jpeg" => "image/jpeg",
       ".webp" => "image/webp",
-      ".gif" => "image/gif"
+      ".gif" => "image/gif",
+      ".pdf" => "application/pdf"
     }.freeze
 
     def self.process(url)
@@ -57,6 +66,11 @@ module ShipChecks
       effective_type = resolve_content_type(content_type, url)
       unless SUPPORTED_CONTENT_TYPES.include?(effective_type)
         Rails.logger.warn("UnifiedScreenshotProcessor: unsupported content_type=#{content_type} for url=#{url}")
+        return nil
+      end
+
+      if effective_type == "application/pdf" && bytes.bytesize > MAX_PDF_INPUT_BYTES
+        Rails.logger.warn("UnifiedScreenshotProcessor: PDF source #{bytes.bytesize} bytes exceeds #{MAX_PDF_INPUT_BYTES} cap for url=#{url}")
         return nil
       end
 
@@ -74,6 +88,15 @@ module ShipChecks
     end
 
     def self.transcode_to_jpeg(input_bytes, content_type)
+      # Rasterize out of process first, then fall through as a PNG. This is the only
+      # path by which a PDF reaches this method, so libvips below only ever opens a
+      # format with a fuzzed loader.
+      if content_type == "application/pdf"
+        input_bytes = ShipChecks::PdfRasterizer.to_png(input_bytes)
+        return nil if input_bytes.nil?
+        content_type = "image/png"
+      end
+
       src_ext = EXT_FOR_CONTENT_TYPE.fetch(content_type)
 
       Tempfile.create([ "screenshot_src", src_ext ]) do |src|

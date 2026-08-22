@@ -1,10 +1,11 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { router } from '@inertiajs/react'
+import { router, usePage } from '@inertiajs/react'
 import { Modal, ModalLink, useModal } from '@inertiaui/modal-react'
 import { BookOpenIcon, ClockIcon, CheckIcon, InformationCircleIcon } from '@heroicons/react/16/solid'
 import { EllipsisHorizontalIcon } from '@heroicons/react/20/solid'
 import { ArrowLeft, Pencil, Trash2, Feather, Loader2, Link2, FileDown } from 'lucide-react'
 import { DateTime } from 'luxon'
+import { twMerge } from 'tailwind-merge'
 import BookLayout from '@/components/shared/BookLayout'
 import Button from '@/components/shared/Button'
 import InlineUser from '@/components/shared/InlineUser'
@@ -19,7 +20,15 @@ import TimeAgo from '@/components/shared/TimeAgo'
 import Timeline from '@/components/shared/Timeline'
 import { SlidingNumber } from '@/components/shared/SlidingNumber'
 import TextMorph from '@/components/shared/TextMorph'
-import type { ProjectDetail, JournalEntryCard, CollaboratorInfo, ShipEvent, JournalSwitchableProject } from '@/types'
+import ShipWarningModal from '@/components/projects/ShipWarningModal'
+import type {
+  ProjectDetail,
+  JournalEntryCard,
+  CollaboratorInfo,
+  ShipEvent,
+  JournalSwitchableProject,
+  SharedProps,
+} from '@/types'
 
 function formatTime(seconds: number): string {
   if (seconds === 0) return '0min'
@@ -71,6 +80,8 @@ function shipStatusLabel(status: string): string {
       return 'was returned for changes'
     case 'rejected':
       return 'was rejected'
+    case 'superseded':
+      return 'withdrew a submission to reship'
     default:
       return status
   }
@@ -209,6 +220,7 @@ export default function ProjectsShow({
     export_journal: boolean
     share: boolean
     ship: boolean
+    reship: boolean
     manage_collaborators: boolean
     create_journal_entry: boolean
     create_journal_entry_locked_for_trial: boolean
@@ -240,6 +252,19 @@ export default function ProjectsShow({
   const [switchingProject, setSwitchingProject] = useState(false)
   const [deleteEntry, setDeleteEntry] = useState<JournalEntryCard | null>(null)
   const [deletingEntry, setDeletingEntry] = useState(false)
+  const [reshipOpen, setReshipOpen] = useState(false)
+  const [shipWarnOpen, setShipWarnOpen] = useState(false)
+  const [reshipping, setReshipping] = useState(false)
+  const { features } = usePage<SharedProps>().props
+  const shipUrl = `/projects/${project.id}/ship`
+  const requirementsUrl = project.built_irl
+    ? '/docs/requirements/submitting-build'
+    : '/docs/requirements/submitting-design'
+  const [holding, setHolding] = useState(false)
+  const [holdProgress, setHoldProgress] = useState(0)
+  const holdFrameRef = useRef<number | null>(null)
+  const holdStartRef = useRef(0)
+  const RESHIP_HOLD_MS = 5000
   const detailProps = ['project', 'journal_entries', 'switchable_projects_for_journal', 'collaborators', 'ships', 'can']
 
   const switchTargets = useMemo(
@@ -455,6 +480,73 @@ export default function ProjectsShow({
       onError: () => notify('alert', 'Failed to delete journal entry.'),
       onFinish: () => setDeletingEntry(false),
     })
+  }
+
+  // During the lockdown, gate ship/resubmit behind the typed "last chance" warning. Abandon-pending
+  // reships are unlimited, so the Reship! button keeps its plain hold-to-confirm regardless of the flag.
+  function requestShip() {
+    if (features.limit_reships) {
+      setShipWarnOpen(true)
+    } else {
+      router.visit(shipUrl)
+    }
+  }
+
+  function openReship() {
+    setHoldProgress(0)
+    setReshipOpen(true)
+  }
+
+  function closeReshipDialog() {
+    if (reshipping) return
+    cancelHold()
+    setReshipOpen(false)
+  }
+
+  function startHold() {
+    if (reshipping || holdFrameRef.current != null) return
+    setHolding(true)
+    holdStartRef.current = performance.now()
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - holdStartRef.current) / RESHIP_HOLD_MS)
+      setHoldProgress(progress)
+      if (progress >= 1) {
+        holdFrameRef.current = null
+        doReship()
+      } else {
+        holdFrameRef.current = requestAnimationFrame(tick)
+      }
+    }
+    holdFrameRef.current = requestAnimationFrame(tick)
+  }
+
+  function cancelHold() {
+    if (holdFrameRef.current != null) {
+      cancelAnimationFrame(holdFrameRef.current)
+      holdFrameRef.current = null
+    }
+    setHolding(false)
+    if (!reshipping) setHoldProgress(0)
+  }
+
+  function doReship() {
+    setReshipping(true)
+    router.post(
+      `/projects/${project.id}/ships/reship`,
+      {},
+      {
+        preserveScroll: true,
+        onSuccess: () => {
+          setReshipOpen(false)
+        },
+        onError: () => notify('alert', 'Failed to re-ship. Please try again.'),
+        onFinish: () => {
+          setReshipping(false)
+          setHolding(false)
+          setHoldProgress(0)
+        },
+      },
+    )
   }
 
   function openSwitchProjectDialog(entry: JournalEntryCard) {
@@ -899,8 +991,13 @@ export default function ProjectsShow({
               )}
             </div>
             {can.ship && (
-              <Button onClick={() => router.visit(`/projects/${project.id}/ship`)} className="px-6 py-2 text-sm">
+              <Button onClick={requestShip} className="px-6 py-2 text-sm">
                 Submit
+              </Button>
+            )}
+            {can.reship && (
+              <Button onClick={openReship} className="px-6 py-2 text-sm">
+                Reship!
               </Button>
             )}
           </div>
@@ -965,7 +1062,7 @@ export default function ProjectsShow({
                           header={
                             <>
                               <InlineUser avatar={project.user_avatar} display_name={project.user_display_name} />{' '}
-                              transferred project from Blueprint
+                              transferred project from {entry.transfer_source}
                               {entry.blueprint_hours ? ` (${entry.blueprint_hours}h)` : ''}{' '}
                               <TimeAgo datetime={event.iso} />.
                             </>
@@ -999,10 +1096,7 @@ export default function ProjectsShow({
                             <div className="space-y-3">
                               <p className="text-sm text-dark-brown whitespace-pre-wrap">{ship.feedback}</p>
                               {can.ship && (
-                                <Button
-                                  onClick={() => router.visit(`/projects/${project.id}/ship`)}
-                                  className="px-4 py-1.5 text-sm"
-                                >
+                                <Button onClick={requestShip} className="px-4 py-1.5 text-sm">
                                   Resubmit
                                 </Button>
                               )}
@@ -1023,7 +1117,14 @@ export default function ProjectsShow({
                               </>
                             }
                           >
-                            <ReviewProgress ship={ship} />
+                            <div className="space-y-3">
+                              <ReviewProgress ship={ship} />
+                              {can.reship && (
+                                <Button onClick={openReship} className="px-4 py-1.5 text-sm">
+                                  Reship!
+                                </Button>
+                              )}
+                            </div>
                           </Timeline.DetailItem>
                         )
                       }
@@ -1221,6 +1322,59 @@ export default function ProjectsShow({
                 className="border-2 border-red-700 bg-red-700 px-3 py-1.5 text-xs font-bold uppercase text-white"
               >
                 {deletingEntry ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ShipWarningModal
+        open={shipWarnOpen}
+        requirementsUrl={requirementsUrl}
+        onConfirm={() => router.visit(shipUrl)}
+        onCancel={() => setShipWarnOpen(false)}
+      />
+
+      {reshipOpen && <div className="fixed inset-0 z-20 backdrop-brightness-75" />}
+
+      {reshipOpen && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center p-4">
+          <div className="w-full max-w-sm border-2 border-dark-brown bg-light-brown p-4">
+            <h3 className="text-lg font-bold text-dark-brown">Reship this project?</h3>
+            <p className="mt-2 text-sm text-dark-brown">
+              Your current submission will be <span className="font-bold">removed from the review queue</span> and
+              replaced with a fresh ship. The new submission goes to the{' '}
+              <span className="font-bold">bottom of the queue</span>, so you&apos;ll wait again - but reviewers will see
+              your latest changes.
+            </p>
+            <p className="mt-2 text-sm text-dark-brown">Hold the button below for 5 seconds to confirm.</p>
+
+            <button
+              type="button"
+              disabled={reshipping}
+              onPointerDown={startHold}
+              onPointerUp={cancelHold}
+              onPointerLeave={cancelHold}
+              onPointerCancel={cancelHold}
+              className={twMerge(
+                'relative mt-4 w-full select-none overflow-hidden border-2 border-dark-brown bg-brown py-2.5 text-sm font-bold uppercase text-light-brown transition-transform duration-100 disabled:cursor-not-allowed touch-none',
+                holding && 'scale-[0.97]',
+              )}
+            >
+              <span className="absolute inset-y-0 left-0 bg-dark-brown" style={{ width: `${holdProgress * 100}%` }} />
+              <span className="relative">
+                {reshipping ? 'Reshipping...' : holding ? 'Keep holding...' : 'Hold to confirm reship'}
+              </span>
+            </button>
+
+            <div className="mt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={closeReshipDialog}
+                disabled={reshipping}
+                className="border-2 border-dark-brown px-3 py-1.5 text-xs font-bold uppercase text-dark-brown disabled:opacity-50"
+              >
+                Cancel
               </button>
             </div>
           </div>

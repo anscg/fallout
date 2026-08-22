@@ -7,12 +7,16 @@
 #  ban_reason                         :text
 #  ban_type                           :string
 #  bio                                :text
+#  certificate_token                  :string
 #  country                            :string
+#  debt_hidden_at                     :datetime
 #  device_token                       :text
 #  discarded_at                       :datetime
 #  display_name                       :string           not null
 #  email                              :string           not null
+#  excluded_from_dashboard            :boolean          default(FALSE), not null
 #  excluded_from_reviewer_suggestions :boolean          default(FALSE), not null
+#  excluded_until                     :date
 #  first_name                         :string
 #  has_hca_address                    :boolean          default(FALSE), not null
 #  hca_token                          :text
@@ -25,6 +29,10 @@
 #  pending_lookout_tokens             :string           default([]), not null, is an Array
 #  professor_enrolled_at              :datetime
 #  pronouns                           :string
+#  reduced_expectations               :boolean          default(FALSE), not null
+#  reduced_expectations_reason        :string
+#  reduced_expectations_target        :decimal(, )
+#  reduced_expectations_until         :date
 #  roles                              :string           default([]), not null, is an Array
 #  slack_token                        :text
 #  streak_freezes                     :integer          default(1), not null
@@ -37,15 +45,23 @@
 #  verification_status                :string
 #  created_at                         :datetime         not null
 #  updated_at                         :datetime         not null
+#  debt_hidden_by_id                  :bigint
 #  hca_id                             :string
 #  slack_id                           :string
 #
 # Indexes
 #
+#  index_users_on_certificate_token   (certificate_token) UNIQUE
+#  index_users_on_debt_hidden_by_id   (debt_hidden_by_id)
 #  index_users_on_device_token        (device_token)
 #  index_users_on_discarded_at        (discarded_at)
 #  index_users_on_hca_id              (hca_id) UNIQUE WHERE (hca_id IS NOT NULL)
+#  index_users_on_search_tsvector     (((to_tsvector('simple'::regconfig, COALESCE((display_name)::text, ''::text)) || to_tsvector('simple'::regconfig, COALESCE((email)::text, ''::text))))) USING gin
 #  index_users_unique_verified_email  (email) UNIQUE WHERE ((type IS NULL) AND (discarded_at IS NULL))
+#
+# Foreign Keys
+#
+#  fk_rails_...  (debt_hidden_by_id => users.id)
 #
 class User < ApplicationRecord
   include Discardable
@@ -126,6 +142,9 @@ class User < ApplicationRecord
   has_one :active_hcb_grant_card, -> { where(status: "active") }, class_name: "HcbGrantCard"
   has_many :project_grant_orders, dependent: :restrict_with_error
   has_one :ticket_claim, dependent: :destroy
+  has_many :debt_check_ins, dependent: :destroy # admin check-ins logged against this user while in debt
+  has_many :authored_debt_check_ins, class_name: "DebtCheckIn", foreign_key: :author_id, dependent: :nullify, inverse_of: :author
+  belongs_to :debt_hidden_by, class_name: "User", optional: true # admin who hid this user from the debt console
   has_many :project_funding_topups, dependent: :restrict_with_error
   has_many :reviewer_notes
   has_many :reviewer_admin_notes, foreign_key: :reviewer_id, dependent: :destroy, inverse_of: :reviewer
@@ -139,11 +158,15 @@ class User < ApplicationRecord
   encrypts :device_token, deterministic: true # Deterministic so find_by lookups work
 
   scope :verified, -> { where(type: nil) } # STI: verified users have type=nil; TrialUser subclass has type='TrialUser'
+  scope :debt_hidden, -> { where.not(debt_hidden_at: nil) } # excluded from the debt console + its export
+  scope :debt_visible, -> { where(debt_hidden_at: nil) }
+  scope :not_banned, -> { where(is_banned: false) }
 
   validates :avatar, :display_name, :email, :timezone, presence: true
   validates :email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_blank: true
   validates :hcb_email, format: { with: URI::MailTo::EMAIL_REGEXP }, allow_blank: true
   validates :bio, length: { maximum: 100 }, allow_nil: true
+  validates :certificate_token, uniqueness: true, allow_nil: true
   validates :slack_id, presence: true, unless: :trial?
   validates :hca_id, presence: true, unless: :trial?
   VALID_ROLES = %w[user admin time_auditor requirements_checker pass2_reviewer hcb].freeze
@@ -154,10 +177,19 @@ class User < ApplicationRecord
   ADMIN_ASSIGNABLE_ROLES = (VALID_ROLES - %w[user hcb]).freeze
   SLACK_WELCOME_CHANNELS = %w[C037157AL30 C0ACG0XQWGN C0ACJ290090].freeze
 
+  # Default approved-hours bar to qualify for a summit ticket. Per-user overrides live in
+  # the ticket_hours_override column. Single source of truth — referenced by the ticket
+  # claim flow and the reviewer queues' "can get a ticket" filter.
+  TICKET_HOURS_THRESHOLD = 60
+
+  # Approved-hours grace below the bar a user may claim with, provided their submitted
+  # (pre-approval) hours already clear the full bar. Deliberately not surfaced to users.
+  TICKET_HOURS_GRACE = 5
+
   # Ban types in priority order (highest first). Higher-priority bans take precedence.
-  BAN_PRIORITY = %w[fallout hcb hardware age hackatime].freeze
+  BAN_PRIORITY = %w[fallout conduct hcb hardware age hackatime].freeze
   # Ban types set/managed manually by humans — UserBanCheckJob will not override these
-  MANUAL_BAN_TYPES = %w[fallout hcb hardware age].freeze
+  MANUAL_BAN_TYPES = %w[fallout conduct hcb hardware age].freeze
 
   validates :roles, presence: true, unless: :trial?
   validate :roles_must_be_valid, unless: :trial?
@@ -485,9 +517,65 @@ class User < ApplicationRecord
     Project.batch_user_approved_seconds(all_ids, self).values.sum
   end
 
-  # Time the user has attributed to journals that are attached to a ship (any status) —
-  # i.e. logged time they've actually submitted, before TA approval. Sits between total
-  # (all logged) and approved (TA-blessed): total >= shipped >= approved.
+  # Approved-hours bar this user must clear for a ticket (their override, else the default).
+  def ticket_hours_threshold
+    ticket_hours_override || TICKET_HOURS_THRESHOLD
+  end
+
+  def debt_hidden?
+    debt_hidden_at.present?
+  end
+
+  # Global kill switch for ticket claiming, with a per-user exemption. Mirrors the
+  # disable_new_submissions / new_submissions_override pattern.
+  def ticket_claims_disabled?
+    Flipper.enabled?(:disable_ticket_claims) && !Flipper.enabled?(:ticket_claims_override, self)
+  end
+
+  # Hours-only ticket qualification on TA-APPROVED hours — the real claim gate. Mirrors the
+  # rounding the ticket claim flow uses. Does NOT consider the identity gate.
+  #
+  # Grace: a user whose SUBMITTED (pre-approval) hours already clear the full bar may claim while
+  # still up to TICKET_HOURS_GRACE approved hours short — the remainder is just waiting on review.
+  # Deliberately invisible: the displayed required bar stays at the full threshold everywhere.
+  def meets_ticket_hours?
+    approved = (approved_time_logged_seconds / 3600.0).round(1)
+    return true if approved >= ticket_hours_threshold
+    approved >= (ticket_hours_threshold - TICKET_HOURS_GRACE) && submitted_ticket_hours?
+  end
+
+  # Issues a public certificate-verification token if this user doesn't already have one.
+  # Generated on demand (see certificates:generate rake task) rather than for every user,
+  # since it's only meaningful for users who actually received a certificate.
+  #
+  # Short (8-char alphanumeric) so it fits cleanly on a printed certificate — unlike a long
+  # random token, collisions are plausible at scale, so retry until an unused one is found.
+  def generate_certificate_token!
+    return if certificate_token.present?
+
+    loop do
+      candidate = SecureRandom.alphanumeric(8)
+      next if self.class.exists?(certificate_token: candidate)
+
+      begin
+        update_column(:certificate_token, candidate) # skips validations/callbacks — only this column changes
+        break
+      rescue ActiveRecord::RecordNotUnique
+        next # another process claimed this candidate between the exists? check and the update
+      end
+    end
+  end
+
+  # Same bar measured against SUBMITTED (shipped, pre-approval) hours — a looser signal used by
+  # the reviewer-queue "can get a ticket" filter. Catches users on track to qualify whose hours
+  # are still in review, unlike meets_ticket_hours? which only counts TA-approved time.
+  def submitted_ticket_hours?
+    (shipped_time_logged_seconds / 3600.0).round(1) >= ticket_hours_threshold
+  end
+
+  # Time the user has attributed to journals attached to a ship (any status), plus their
+  # share of project-level manual_seconds. Sits between total (all logged) and approved
+  # (TA-blessed): total >= shipped >= approved.
   def shipped_time_logged_seconds
     all_ids = projects_attributable_to_self_ids
     return 0 if all_ids.empty?
@@ -518,10 +606,7 @@ class User < ApplicationRecord
 
     # Fire the three ledger sums in parallel — wall-time ≈ 1 round-trip instead of 3.
     earned = koi_transactions.async_sum(:amount)
-    spent_shop = shop_orders.joins(:shop_item)
-                            .where(shop_items: { currency: "koi" })
-                            .where.not(state: :rejected)
-                            .async_sum("frozen_price * quantity")
+    spent_shop = shop_orders.where.not(state: :rejected).async_sum(:frozen_koi_amount)
     spent_grants = project_grant_orders.kept.where.not(state: :rejected).async_sum(:frozen_koi_amount)
 
     earned.value - spent_shop.value - spent_grants.value
@@ -533,10 +618,7 @@ class User < ApplicationRecord
     # Recomputed live from the ledger, mirroring #koi — no denormalized counter.
     # Fire the three sums in parallel — wall-time ≈ 1 round-trip instead of 3.
     earned = gold_transactions.async_sum(:amount)
-    spent_shop = shop_orders.joins(:shop_item)
-                            .where(shop_items: { currency: "gold" })
-                            .where.not(state: :rejected)
-                            .async_sum("frozen_price * quantity")
+    spent_shop = shop_orders.where.not(state: :rejected).async_sum(:frozen_gold_amount)
     spent_grants = project_grant_orders.kept.where.not(state: :rejected).async_sum(:frozen_gold_amount)
 
     earned.value - spent_shop.value - spent_grants.value
@@ -577,11 +659,16 @@ class User < ApplicationRecord
       h[u.id] = (u.total_time_logged_seconds / 3600.0).floor
     end
 
+    on_track = where(id: user_ids).each_with_object({}) do |u, h|
+      h[u.id] = (u.shipped_time_logged_seconds / 3600.0).round(1) >= u.ticket_hours_threshold
+    end
+
     {
       first_project_created_at: Project.kept.where(user_id: user_ids).group(:user_id).minimum(:created_at),
       latest_visit_country: latest_visit_country,
       last_journal_at: JournalEntry.kept.where(user_id: user_ids).group(:user_id).maximum(:created_at),
-      db_hours: db_hours
+      db_hours: db_hours,
+      on_track: on_track
     }
   end
 
@@ -600,7 +687,8 @@ class User < ApplicationRecord
       "Deleted At" => ->(u) { u.discarded_at&.iso8601 },
       "Email Verified" => ->(u) { !u.trial? },
       "Is Active" => ->(u, pre) { pre[:last_journal_at][u.id].present? && pre[:last_journal_at][u.id] >= 8.days.ago },
-      "DB Hours Logged" => ->(u, pre) { pre[:db_hours][u.id] || 0 }
+      "DB Hours Logged" => ->(u, pre) { pre[:db_hours][u.id] || 0 },
+      "Ontrack" => ->(u, pre) { pre[:on_track][u.id] || false }
     }
   end
 

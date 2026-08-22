@@ -301,8 +301,10 @@ interface GalleryProps {
     onRefresh?: () => void;
     onAdd?: () => void;
     onSettings?: () => void;
+    /** Optional content rendered just below the header (e.g. an update banner). */
+    banner?: React__default.ReactNode;
 }
-declare function Gallery({ sessions, loading, error, onSessionClick, onArchive, onRefresh, onAdd, onSettings, }: GalleryProps): React__default.JSX.Element;
+declare function Gallery({ sessions, loading, error, onSessionClick, onArchive, onRefresh, onAdd, onSettings, banner, }: GalleryProps): React__default.JSX.Element;
 
 interface SessionCardProps {
     session: SessionSummary;

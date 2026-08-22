@@ -7,12 +7,16 @@
 #  ban_reason                         :text
 #  ban_type                           :string
 #  bio                                :text
+#  certificate_token                  :string
 #  country                            :string
+#  debt_hidden_at                     :datetime
 #  device_token                       :text
 #  discarded_at                       :datetime
 #  display_name                       :string           not null
 #  email                              :string           not null
+#  excluded_from_dashboard            :boolean          default(FALSE), not null
 #  excluded_from_reviewer_suggestions :boolean          default(FALSE), not null
+#  excluded_until                     :date
 #  first_name                         :string
 #  has_hca_address                    :boolean          default(FALSE), not null
 #  hca_token                          :text
@@ -25,6 +29,10 @@
 #  pending_lookout_tokens             :string           default([]), not null, is an Array
 #  professor_enrolled_at              :datetime
 #  pronouns                           :string
+#  reduced_expectations               :boolean          default(FALSE), not null
+#  reduced_expectations_reason        :string
+#  reduced_expectations_target        :decimal(, )
+#  reduced_expectations_until         :date
 #  roles                              :string           default([]), not null, is an Array
 #  slack_token                        :text
 #  streak_freezes                     :integer          default(1), not null
@@ -37,15 +45,23 @@
 #  verification_status                :string
 #  created_at                         :datetime         not null
 #  updated_at                         :datetime         not null
+#  debt_hidden_by_id                  :bigint
 #  hca_id                             :string
 #  slack_id                           :string
 #
 # Indexes
 #
+#  index_users_on_certificate_token   (certificate_token) UNIQUE
+#  index_users_on_debt_hidden_by_id   (debt_hidden_by_id)
 #  index_users_on_device_token        (device_token)
 #  index_users_on_discarded_at        (discarded_at)
 #  index_users_on_hca_id              (hca_id) UNIQUE WHERE (hca_id IS NOT NULL)
+#  index_users_on_search_tsvector     (((to_tsvector('simple'::regconfig, COALESCE((display_name)::text, ''::text)) || to_tsvector('simple'::regconfig, COALESCE((email)::text, ''::text))))) USING gin
 #  index_users_unique_verified_email  (email) UNIQUE WHERE ((type IS NULL) AND (discarded_at IS NULL))
+#
+# Foreign Keys
+#
+#  fk_rails_...  (debt_hidden_by_id => users.id)
 #
 #  id                                 :bigint           not null, primary key
 #  avatar                             :string           not null

@@ -3,7 +3,9 @@
 # resulting image stored as an anonymous ActiveStorage blob.
 #
 # Source priority: zine from repo (via UnifiedScreenshotFinder) > journal entry image.
-# PDFs are rasterised to a PNG of their first page before compositing.
+# A PDF zine is rendered to PNG by ShipChecks::PdfRasterizer before compositing.
+# libvips never opens the PDF itself: pdfload stays blocked by Active Storage's
+# Vips.block_untrusted(true) (CVE-2026-66066). SVG has no such path and is skipped.
 #
 # Returns nil if no source image is available or compositing fails.
 class ReviewCardImageService
@@ -27,9 +29,9 @@ class ReviewCardImageService
     overlay_path = OVERLAY_DIR.join(overlay_filename)
     return nil unless overlay_path.exist?
 
-    source_file = direct_zine_source_file(project) || zine_source_file(project) || journal_source_file(project)
+    source_file = usable_source_file(project)
     unless source_file
-      Rails.logger.warn("ReviewCardImageService: no source image for project ##{project.id}")
+      Rails.logger.warn("ReviewCardImageService: no usable source image for project ##{project.id}")
       return nil
     end
 
@@ -43,6 +45,51 @@ class ReviewCardImageService
   ensure
     source_file&.close!
   end
+
+  # Walks the source candidates in priority order and returns the first one we can
+  # actually render. A PDF that poppler rejects falls through to the next candidate
+  # rather than losing the card entirely.
+  def self.usable_source_file(project)
+    candidates = [
+      -> { direct_zine_source_file(project) },
+      -> { zine_source_file(project) },
+      -> { journal_source_file(project) }
+    ]
+
+    candidates.each do |fetch|
+      raw = fetch.call
+      next if raw.nil?
+
+      rendered = rasterize_if_pdf(raw)
+      if rendered.nil?
+        Rails.logger.warn("ReviewCardImageService: PDF source unrenderable for project ##{project.id}, trying next source")
+        raw.close!
+        next
+      end
+
+      raw.close! unless rendered.equal?(raw)
+      return rendered
+    end
+
+    nil
+  end
+  private_class_method :usable_source_file
+
+  # Detects a PDF by content, not by filename, then hands it to the out-of-process
+  # rasterizer. Non-PDF sources pass through untouched.
+  def self.rasterize_if_pdf(file)
+    return file unless File.binread(file.path, 5) == "%PDF-"
+
+    png = ShipChecks::PdfRasterizer.to_png(File.binread(file.path))
+    return nil if png.nil?
+
+    tmp = Tempfile.new([ "zine_raster", ".png" ])
+    tmp.binmode
+    tmp.write(png)
+    tmp.flush
+    tmp
+  end
+  private_class_method :rasterize_if_pdf
 
   # Downloads the zine URL from UnifiedScreenshotFinder and writes it to a
   # tempfile. Returns the tempfile path, or nil if not found/downloadable.
@@ -86,6 +133,14 @@ class ReviewCardImageService
 
     encoded_url = Addressable::URI.parse(url).normalize.to_s
     ext = File.extname(URI.parse(encoded_url).path).downcase.presence || ".png"
+    # Bail on formats we cannot render (SVG in particular) so `call` falls through
+    # to the journal-image source instead of downloading a file composite() rejects.
+    # PDF is in this map and passes: rasterize_if_pdf converts it before compositing.
+    unless ShipChecks::UnifiedScreenshotProcessor::CONTENT_TYPE_FROM_EXT.key?(ext)
+      Rails.logger.warn("ReviewCardImageService: unsupported zine format #{ext} for project ##{project.id}")
+      return nil
+    end
+
     tmp = Tempfile.new([ "zine_source", ext ])
     tmp.binmode
 

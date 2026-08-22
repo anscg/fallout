@@ -1,11 +1,13 @@
 import type { ReactNode } from 'react'
-import { Link, router, usePage } from '@inertiajs/react'
+import { Link, Deferred, router, usePage } from '@inertiajs/react'
 import AdminLayout from '@/layouts/AdminLayout'
 import { Badge } from '@/components/admin/ui/badge'
 import { Button } from '@/components/admin/ui/button'
 import { DataTable } from '@/components/admin/DataTable'
+import { DataTableSkeleton } from '@/components/admin/DataTableSkeleton'
 import { buildPendingColumns, buildAllColumns } from '@/components/admin/reviewColumns'
 import { ReviewStatsHeader, type ReviewStats, type ReviewStatKey } from '@/components/admin/ReviewStats'
+import TicketFilterButton from '@/components/admin/TicketFilterButton'
 import type { ReviewRow, PagyProps } from '@/types'
 
 const BASE_PATH = '/admin/reviews/requirements_checks'
@@ -16,15 +18,17 @@ export default function RequirementsChecksIndex({
   pagy,
   start_reviewing_path,
   current_sort,
+  ticket_eligible,
   stats_keys,
   stats,
   sla_days,
 }: {
-  pending_reviews: ReviewRow[]
-  all_reviews: ReviewRow[]
-  pagy: PagyProps
+  pending_reviews?: ReviewRow[]
+  all_reviews?: ReviewRow[]
+  pagy?: PagyProps
   start_reviewing_path: string
   current_sort: 'hours' | 'waiting'
+  ticket_eligible: boolean
   stats_keys: ReviewStatKey[]
   stats?: ReviewStats
   sla_days?: number
@@ -44,6 +48,9 @@ export default function RequirementsChecksIndex({
       ),
   }
 
+  const pendingColumns = buildPendingColumns(BASE_PATH, 'Time Audit done', sortByHours ? [hoursColumn] : [], sla_days)
+  const allColumns = buildAllColumns(isAdmin, BASE_PATH)
+
   return (
     <div className="space-y-8">
       <div>
@@ -54,13 +61,14 @@ export default function RequirementsChecksIndex({
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold tracking-tight">
             Pending Requirements Checks
-            {pending_reviews.length > 0 && (
+            {pending_reviews && pending_reviews.length > 0 && (
               <Badge variant="secondary" className="ml-2 text-xs">
                 {pending_reviews.length}
               </Badge>
             )}
           </h2>
           <div className="flex items-center gap-2">
+            <TicketFilterButton basePath={BASE_PATH} active={ticket_eligible} />
             <Button
               variant={sortByHours ? 'default' : 'outline'}
               size="sm"
@@ -74,36 +82,39 @@ export default function RequirementsChecksIndex({
             >
               {sortByHours ? 'Sort: Hours' : 'Sort: Time Waiting'}
             </Button>
-            {pending_reviews.length > 0 && (
+            {pending_reviews && pending_reviews.length > 0 && (
               <Button asChild size="sm">
                 <Link href={`${start_reviewing_path}?sort=${sortByHours ? 'hours' : 'waiting'}`}>Start Reviewing</Link>
               </Button>
             )}
           </div>
         </div>
-        <DataTable
-          columns={buildPendingColumns(BASE_PATH, 'Time Audit done', sortByHours ? [hoursColumn] : [], sla_days)}
-          data={pending_reviews}
-          noun="pending reviews"
-          rowClassName={(row) => {
-            if (row.priority) return 'bg-green-100 dark:bg-green-950/40'
-            const parts: string[] = []
-            if (row.previously_reviewed_by_me) parts.push('bg-blue-50 dark:bg-blue-950/20')
-            if (row.sibling_approved) parts.push('bg-yellow-50 dark:bg-yellow-950/20')
-            return parts.length > 0 ? parts.join(' ') : undefined
-          }}
-        />
+        <Deferred data="pending_reviews" fallback={<DataTableSkeleton columns={pendingColumns.length} />}>
+          <DataTable
+            columns={pendingColumns}
+            data={pending_reviews ?? []}
+            noun="pending reviews"
+            rowClassName={(row) => {
+              const parts: string[] = []
+              if (row.previously_reviewed_by_me) parts.push('bg-blue-50 dark:bg-blue-950/20')
+              if (row.sibling_approved) parts.push('bg-yellow-50 dark:bg-yellow-950/20')
+              return parts.length > 0 ? parts.join(' ') : undefined
+            }}
+          />
+        </Deferred>
       </div>
 
       <div>
         <h2 className="text-lg font-semibold tracking-tight mb-3">All Requirements Checks</h2>
-        <DataTable
-          columns={buildAllColumns(isAdmin, BASE_PATH)}
-          data={all_reviews}
-          pagy={pagy}
-          noun="reviews"
-          rowClassName={(row) => (row.previously_reviewed_by_me ? 'bg-blue-50 dark:bg-blue-950/20' : undefined)}
-        />
+        <Deferred data={['all_reviews', 'pagy']} fallback={<DataTableSkeleton columns={allColumns.length} />}>
+          <DataTable
+            columns={allColumns}
+            data={all_reviews ?? []}
+            pagy={pagy}
+            noun="reviews"
+            rowClassName={(row) => (row.previously_reviewed_by_me ? 'bg-blue-50 dark:bg-blue-950/20' : undefined)}
+          />
+        </Deferred>
       </div>
     </div>
   )

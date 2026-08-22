@@ -1,4 +1,4 @@
-export type BanType = 'fallout' | 'hcb' | 'hardware' | 'age' | 'hackatime'
+export type BanType = 'fallout' | 'hcb' | 'hardware' | 'age' | 'hackatime' | 'conduct'
 
 export interface User {
   id: number
@@ -22,6 +22,7 @@ export interface Features {
   collaborators?: boolean
   shop?: boolean
   grant_fulfillment: true
+  limit_reships?: boolean
 }
 
 export type IdentityGateState = 'unverified' | 'pending' | 'verified_no_address' | 'verified_with_address'
@@ -32,8 +33,14 @@ export interface IdentityGate {
   address_url: string
 }
 
+export interface Impersonation {
+  impersonator_name: string
+  stop_path: string
+}
+
 export interface SharedProps {
   auth: { user: User | null }
+  impersonation: Impersonation | null
   flash: FlashData
   features: Features
   sign_in_path: string
@@ -128,6 +135,7 @@ export interface ProjectDetail {
   description: string | null
   demo_link: string | null
   repo_link: string | null
+  built_irl: boolean
   is_unlisted: boolean
   tags: string[]
   user_display_name: string
@@ -162,6 +170,7 @@ export interface JournalEntryCard {
   can_switch_project: boolean
   can_delete: boolean
   is_blueprint_transfer: boolean
+  transfer_source: string | null
   blueprint_hours: number | null
 }
 
@@ -414,17 +423,41 @@ export interface ReviewRow {
   requirements_check_reviewer_display_name: string | null
   previously_reviewed_by_me: boolean
   approved_public_hours: number | null
-  priority: boolean
 }
 
 export interface TimeAuditReviewDetail {
   id: number
-  ship_id: number
+  ship_id: number | null // null when the page is rendering a standalone ProjectTimeAudit
   status: string
   feedback: string | null
   approved_public_seconds: number | null
   annotations: TimeAuditAnnotations | null
   reviewer_display_name: string | null
+  created_at: string
+}
+
+// An ad-hoc, project-wide time audit (ProjectTimeAudit) — no ship, no review queue, no effect on
+// approved hours. Reached only via its secret share link.
+export interface ProjectAuditContext {
+  token: string
+  label: string | null
+  share_url: string
+  created_by_display_name: string
+  last_edited_by_display_name: string | null
+  computed_hours: number | null
+  saved_at: string | null
+  created_at: string
+}
+
+export interface ProjectAuditSessionRow {
+  token: string
+  label: string | null
+  path: string
+  share_url: string
+  created_by_display_name: string
+  last_edited_by_display_name: string | null
+  computed_hours: number | null
+  saved_at: string | null
   created_at: string
 }
 
@@ -464,6 +497,7 @@ export interface ReviewRecording {
   recordable_id?: number
   video_id?: string
   yt_duration_seconds?: number
+  timelapse_ready?: boolean // YouTube video processed into a 60× timelapse — render/bill like Lapse/Lookout
   inactive_segments?: InactiveSegment[]
   inactive_percentage?: number
   activity_checked?: boolean
@@ -479,6 +513,7 @@ export interface ReviewJournalEntry {
   created_at_iso: string
   recordings: ReviewRecording[]
   total_duration: number
+  in_ship: boolean
 }
 
 export interface ReviewShipContext {
@@ -506,6 +541,7 @@ export interface RequirementsCheckProjectContext extends ReviewProjectContext {
   tags: string[]
   created_at: string
   logged_hours: number
+  ship_logged_hours: number
   approved_public_hours: number | null
   approved_internal_hours: number | null
   entry_count: number
@@ -643,6 +679,7 @@ export interface RequirementsCheckJournalEntry {
   total_duration: number
   approved_duration: number
   recordings: RecordingSummary[]
+  in_ship: boolean
 }
 
 export interface RequirementsCheckReviewDetail {

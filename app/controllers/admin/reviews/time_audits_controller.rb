@@ -1,21 +1,15 @@
 class Admin::Reviews::TimeAuditsController < Admin::Reviews::BaseController
+  include TimeAuditSerialization
+
   def index
-    base = policy_scope(TimeAuditReview)
-      .includes(ship: [ :project, :requirements_check_review, :time_audit_review, project: :user ], reviewer: [])
-
-    pending_reviews = base.pending.where.not(ship_id: flagged_ship_ids).order(created_at: :asc).load
-    @pagy, @all_reviews = pagy(base.order(created_at: :desc))
-    flagged_ids = ProjectFlag.distinct.pluck(:project_id).to_set
-    Ship.preload_cycle_started_at((pending_reviews + @all_reviews).map(&:ship)) # avoid N+1 in serialize_review_row (dedup done inside)
-    priority_ids = ReviewPriorityCalculator.priority_ship_ids(pending_reviews.map(&:ship))
-    pending_reviews = sort_pending(pending_reviews, nil, {}, priority_ids)
-
+    # Filter/sort chrome and stats keys render instantly; the heavy queue lists are deferred
+    # so the page shell appears immediately and the tables show a skeleton until data lands.
+    ticket_eligible = parse_ticket_filter
     render inertia: {
-      pending_reviews: pending_reviews.map { |r| serialize_review_row(r, priority_ship_ids: priority_ids) },
-      all_reviews: @all_reviews.map { |r| serialize_review_row(r, flagged_project_ids: flagged_ids) },
-      pagy: pagy_props(@pagy),
       start_reviewing_path: next_admin_reviews_time_audits_path,
-      **review_stats_props(TimeAuditReview)
+      ticket_eligible: ticket_eligible,
+      **review_stats_props(TimeAuditReview),
+      **deferred_index_props(ticket_eligible)
     }
   end
 
@@ -34,11 +28,12 @@ class Admin::Reviews::TimeAuditsController < Admin::Reviews::BaseController
       .order(created_at: :asc)
 
     render inertia: {
+      mode: "ship",
       review: serialize_review_detail(@review),
       ship: serialize_ship_context(ship),
-      project: serialize_project_context(project),
-      new_entries: new_entries.map { |je| serialize_journal_entry(je) },
-      previous_entries: previous_entries.map { |je| serialize_journal_entry(je) },
+      project: serialize_ta_project_context(project),
+      new_entries: new_entries.map { |je| serialize_ta_journal_entry(je, ship) },
+      previous_entries: previous_entries.map { |je| serialize_ta_journal_entry(je, ship) },
       sibling_statuses: serialize_sibling_statuses(ship),
       reviewer_notes: InertiaRails.defer { serialize_reviewer_notes(project) },
       reviewer_notes_path: admin_project_reviewer_notes_path(project),
@@ -47,7 +42,9 @@ class Admin::Reviews::TimeAuditsController < Admin::Reviews::BaseController
       skip: params[:skip],
       heartbeat_path: heartbeat_admin_reviews_time_audit_path(@review),
       next_path: next_admin_reviews_time_audits_path,
-      index_path: admin_reviews_time_audits_path
+      index_path: admin_reviews_time_audits_path,
+      update_path: admin_reviews_time_audit_path(@review),
+      update_key: "time_audit_review"
     }
   end
 
@@ -85,17 +82,37 @@ class Admin::Reviews::TimeAuditsController < Admin::Reviews::BaseController
 
   private
 
-  def review_model
-    TimeAuditReview
+  # Memoized loader shared by the deferred index props so the heavy queue query runs once per
+  # deferred request even though pending_reviews/all_reviews/pagy are separate Inertia props.
+  def deferred_index_props(ticket_eligible)
+    memo = nil
+    load = lambda do
+      memo ||= begin
+        base = policy_scope(TimeAuditReview)
+          .includes(ship: [ :project, :requirements_check_review, :time_audit_review, project: :user ], reviewer: [])
+
+        pending_reviews = base.pending.where.not(ship_id: flagged_ship_ids).order(created_at: :asc).load
+        pending_reviews = filter_ticket_eligible(pending_reviews) if ticket_eligible
+        @pagy, @all_reviews = pagy(base.order(created_at: :desc))
+        flagged_ids = ProjectFlag.distinct.pluck(:project_id).to_set
+        Ship.preload_cycle_started_at((pending_reviews + @all_reviews).map(&:ship)) # avoid N+1 in serialize_review_row (dedup done inside)
+        pending_reviews = sort_pending(pending_reviews, nil, {})
+        {
+          pending_reviews: pending_reviews.map { |r| serialize_review_row(r) },
+          all_reviews: @all_reviews.map { |r| serialize_review_row(r, flagged_project_ids: flagged_ids) },
+          pagy: pagy_props(@pagy)
+        }
+      end
+    end
+    {
+      pending_reviews: InertiaRails.defer(group: "index") { load.call[:pending_reviews] },
+      all_reviews: InertiaRails.defer(group: "index") { load.call[:all_reviews] },
+      pagy: InertiaRails.defer(group: "index") { load.call[:pagy] }
+    }
   end
 
-  # Time audit frontend handles stretch_multiplier itself — keep raw video duration here to avoid double-counting
-  def recording_duration(recording)
-    case recording.recordable
-    when LookoutTimelapse, LapseTimelapse then recording.recordable.duration.to_i
-    when YouTubeVideo then recording.recordable.duration_seconds.to_i
-    else 0
-    end
+  def review_model
+    TimeAuditReview
   end
 
   def review_params
@@ -152,62 +169,5 @@ class Admin::Reviews::TimeAuditsController < Admin::Reviews::BaseController
       status: ship.status,
       created_at: ship.created_at.strftime("%B %d, %Y")
     }
-  end
-
-  def serialize_project_context(project)
-    {
-      id: project.id,
-      name: project.name,
-      description: project.description,
-      repo_link: project.repo_link,
-      demo_link: project.demo_link,
-      user_id: project.user_id,
-      user_display_name: project.user.display_name,
-      user_avatar: project.user.avatar,
-      collaborators: project.collaborator_users.map { |u| { id: u.id, display_name: u.display_name, avatar: u.avatar } }
-    }
-  end
-
-  def serialize_journal_entry(journal_entry)
-    {
-      id: journal_entry.id,
-      content_html: helpers.render_user_markdown(journal_entry.content.to_s),
-      images: journal_entry.images.map { |img| url_for(img) },
-      author_display_name: journal_entry.user.display_name,
-      author_avatar: journal_entry.user.avatar,
-      created_at: journal_entry.created_at.strftime("%b %d, %Y"),
-      created_at_iso: journal_entry.created_at.iso8601,
-      recordings: journal_entry.recordings.map { |r| serialize_recording(r) },
-      total_duration: journal_entry.recordings.sum { |r| recording_duration(r) }
-    }
-  end
-
-  def serialize_recording(recording)
-    recordable = recording.recordable
-    base = {
-      id: recording.id,
-      type: recording.recordable_type,
-      duration: recording_duration(recording),
-      name: recordable.try(:name) || recordable.try(:title) || "Recording",
-      inactive_segments: recordable.try(:inactive_segments) || [],
-      inactive_percentage: recordable.try(:inactive_percentage),
-      activity_checked: recordable.try(:activity_checked_at).present?
-    }
-
-    case recordable
-    when LookoutTimelapse
-      base.merge(playback_url: recordable.playback_url, thumbnail_url: recordable.thumbnail_url)
-    when LapseTimelapse
-      base.merge(playback_url: recordable.playback_url, thumbnail_url: recordable.thumbnail_url)
-    when YouTubeVideo
-      base.merge(
-        recordable_id: recordable.id, # YouTubeVideo record id for admin refetch action
-        video_id: recordable.video_id,
-        thumbnail_url: recordable.thumbnail_url,
-        yt_duration_seconds: recordable.duration_seconds # used as timeline fallback before YT player loads
-      )
-    else
-      base
-    end
   end
 end

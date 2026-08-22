@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { router, Link } from '@inertiajs/react'
+import { router, Link, Deferred } from '@inertiajs/react'
 import type { ColumnDef } from '@tanstack/react-table'
 import AdminLayout from '@/layouts/AdminLayout'
 import { Badge } from '@/components/admin/ui/badge'
 import { Button } from '@/components/admin/ui/button'
+import { Skeleton } from '@/components/admin/ui/skeleton'
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/admin/ui/input-group'
 import {
   DropdownMenu,
@@ -13,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/admin/ui/dropdown-menu'
 import { DataTable } from '@/components/admin/DataTable'
+import { DataTableSkeleton } from '@/components/admin/DataTableSkeleton'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { SearchIcon, SlidersHorizontalIcon, Loader2, Star } from 'lucide-react'
 import type { AdminProjectRow, PagyProps } from '@/types'
@@ -31,7 +33,12 @@ const columns: ColumnDef<AdminProjectRow>[] = [
         {row.original.is_featured && (
           <Star className="size-3.5 fill-amber-400 text-amber-500 shrink-0" aria-label="Featured" />
         )}
-        <Link href={`/admin/projects/${row.original.id}`} className="text-primary hover:underline">
+        <Link
+          href={`/admin/projects/${row.original.id}`}
+          prefetch
+          cacheFor="30s"
+          className="text-primary hover:underline"
+        >
           {row.original.name}
         </Link>
         {row.original.is_unlisted && (
@@ -51,7 +58,12 @@ const columns: ColumnDef<AdminProjectRow>[] = [
     accessorKey: 'user_display_name',
     header: 'Owner',
     cell: ({ row }) => (
-      <Link href={`/admin/users/${row.original.user_id}`} className="text-primary hover:underline">
+      <Link
+        href={`/admin/users/${row.original.user_id}`}
+        prefetch
+        cacheFor="30s"
+        className="text-primary hover:underline"
+      >
         {row.original.user_display_name}
       </Link>
     ),
@@ -95,13 +107,13 @@ const columns: ColumnDef<AdminProjectRow>[] = [
 ]
 
 interface PageProps {
-  projects: AdminProjectRow[]
-  pagy: PagyProps
+  projects?: AdminProjectRow[]
+  pagy?: PagyProps
   query: string
   include_deleted: boolean
   hide_unlisted: boolean
   with_journals: boolean
-  total_count: number
+  total_count?: number
 }
 
 export default function AdminProjectsIndex({
@@ -195,7 +207,7 @@ export default function AdminProjectsIndex({
       <div className="flex items-center gap-2 mb-4">
         <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
         <Badge variant="secondary" className="text-sm">
-          {total_count}
+          {total_count ?? <Skeleton className="h-4 w-8" />}
         </Badge>
       </div>
 
@@ -242,7 +254,9 @@ export default function AdminProjectsIndex({
         </div>
       </div>
 
-      <DataTable columns={columns} data={projects} pagy={pagy} noun="projects" />
+      <Deferred data={['projects', 'pagy']} fallback={<DataTableSkeleton columns={columns.length} />}>
+        <DataTable columns={columns} data={projects ?? []} pagy={pagy} noun="projects" />
+      </Deferred>
     </div>
   )
 }

@@ -15,6 +15,10 @@ class UserPolicy < ApplicationPolicy
     admin?
   end
 
+  def impersonate?
+    admin?
+  end
+
   def update_streak_day?
     admin?
   end
@@ -28,6 +32,14 @@ class UserPolicy < ApplicationPolicy
   end
 
   def toggle_reviewer_suggestion?
+    admin?
+  end
+
+  def toggle_dashboard_exclusion?
+    admin?
+  end
+
+  def toggle_reduced_expectations?
     admin?
   end
 

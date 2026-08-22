@@ -2,7 +2,7 @@ class Admin::ReviewersController < Admin::ApplicationController
   skip_after_action :verify_authorized   # No index action; authorize called explicitly below
   skip_after_action :verify_policy_scoped # No index action
 
-  TA_HOURS_PER_REVIEW_EQUIVALENT = 10
+  TA_HOURS_PER_REVIEW_EQUIVALENT = 20
 
   def show
     @reviewer = User.find(params[:id])

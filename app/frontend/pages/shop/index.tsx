@@ -30,9 +30,7 @@ export default function ShopIndex({
   koi_balance,
   gold_balance,
   user_hours,
-  approved_hours,
-  ticket_hours_threshold,
-  ticket_claim_state,
+  has_approved_project,
   user_id,
   pending_dialog,
 }: {
@@ -41,9 +39,7 @@ export default function ShopIndex({
   koi_balance: number
   gold_balance: number
   user_hours: number
-  approved_hours: number
-  ticket_hours_threshold: number
-  ticket_claim_state: 'pending' | 'approved' | 'rejected' | null
+  has_approved_project: boolean
   user_id: number
   pending_dialog: string | null
 }) {
@@ -175,10 +171,6 @@ export default function ShopIndex({
     }, 300)
   }
 
-  // Hours-currency items (e.g. the Fallout ticket) are always pulled into the special
-  // top row regardless of the grant_fulfillment flag — they have their own CLAIM flow.
-  // When grant_fulfillment is on, the project funding tile also appears in that row.
-  const specialHoursItems = shop_items.filter((i) => i.currency === 'hours')
   const regularItems = shop_items.filter((i) => i.currency !== 'hours')
 
   const sortedItems = [...regularItems].sort((a, b) => {
@@ -188,7 +180,9 @@ export default function ShopIndex({
     const bPinned = bIdx !== -1
     if (aPinned && bPinned) return aIdx - bIdx
     if (aPinned !== bPinned) return aPinned ? -1 : 1
-    return 0
+    // Available before unavailable, each group sorted cheapest -> most expensive.
+    if (a.status !== b.status) return a.status === 'available' ? -1 : 1
+    return a.price - b.price
   })
 
   const content = (
@@ -210,7 +204,7 @@ export default function ShopIndex({
 
         <h1 className=" font-bold whitespace-nowrap text-2xl sm:text-3xl md:text-4xl text-dark-brown">The Shop</h1>
         <div className="my-2 mx-auto text-sm sm:text-base text-brown text-center max-w-sm leading-tight">
-          Prizes unrelated to the inperson event will be available for purchase after the hackathon (July 7th)
+          Don't see what you're looking for?Suggest it in the Shop Items canvas on Slack!
         </div>
         <div className="sticky top-0 md:-top-6 left-0 z-10 w-full flex justify-center py-2 border-dark-brown/20 -mx-2 xs:-mx-4 md:-mx-8 px-2 xs:px-4 md:px-8">
           <div className="border-2 border-dark-brown bg-brown rounded-md p-[6px]">
@@ -226,75 +220,9 @@ export default function ShopIndex({
             </ul>
           </div>
         </div>
-        {/* Special row: project funding + hours-currency items (e.g. Fallout ticket).
-            These are distinct from regular shop items — no pin star, always at the top,
-            always shown in a wider 2-column layout so the progress bars and icons breathe. */}
-        <ul className="mt-6 w-full grid gap-4 grid-cols-1 sm:grid-cols-2 auto-rows-[380px]">
-          {/* Hours-currency items (e.g. Ticket to Fallout) come first — they're the
-                marquee event prize and should sit visually leftmost. */}
-          {specialHoursItems.map((item) => (
-            <li
-              key={item.id}
-              className="border-2 border-dark-brown bg-brown/60 relative h-[380px] w-full rounded-md text-dark-brown p-4 flex flex-col gap-2 hover:-translate-y-1 hover:shadow-sm hover:z-[1] transition-all duration-300 group"
-            >
-              <span className="text-2xl font-bold leading-6 text-dark-brown pb-1 break-words min-w-0 line-clamp-2">
-                {item.name}
-              </span>
-              <div className="w-full h-50 p-4 rounded-sm border-3 border-dark-brown bg-beige relative overflow-hidden flex items-center justify-center">
-                {item.image_url && (
-                  <img
-                    src={item.image_url}
-                    alt={item.name}
-                    loading="lazy"
-                    onError={(e) => (e.currentTarget.style.display = 'none')}
-                    className="group-hover:scale-105 transition-transform duration-300 w-full h-full object-contain"
-                  />
-                )}
-              </div>
-              <div className="py-1 flex items-start justify-between gap-4">
-                <span className="leading-tight text-base min-w-0 break-words line-clamp-3">{item.description}</span>
-                <span className="text-2xl font-bold text-dark-brown shrink-0">{item.price}h</span>
-              </div>
-              <div className="mt-auto flex flex-col gap-2">
-                {approved_hours < ticket_hours_threshold && (
-                  <div className="w-full h-10 bg-brown border-2 border-dark-brown rounded-sm overflow-hidden relative">
-                    <div
-                      className="h-full bg-dark-brown transition-all duration-500"
-                      style={{ width: `${Math.min((user_hours / ticket_hours_threshold) * 100, 100)}%` }}
-                    />
-                    <span className="absolute inset-0 flex items-center justify-center text-light-brown font-bold text-2xl">
-                      {user_hours}h / {ticket_hours_threshold}h
-                    </span>
-                  </div>
-                )}
-                {approved_hours >= ticket_hours_threshold ? (
-                  ticket_claim_state === 'pending' ? (
-                    <div className="w-full h-10 bg-brown border-2 border-dark-brown rounded-sm text-dark-brown font-bold flex items-center justify-center text-sm cursor-default select-none">
-                      Claim submitted — pending review
-                    </div>
-                  ) : ticket_claim_state === 'approved' ? (
-                    <div className="w-full h-10 bg-dark-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center text-base cursor-default select-none">
-                      Ticket approved!
-                    </div>
-                  ) : identityBlocked ? (
-                    <div className="w-full h-10 bg-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center cursor-not-allowed text-base px-2 text-center select-none">
-                      {identity_gate?.state === 'verified_no_address'
-                        ? 'Add address to claim'
-                        : 'Verify identity to claim'}
-                    </div>
-                  ) : (
-                    <Link
-                      href="/claim-ticket"
-                      className="w-full h-10 bg-dark-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center text-2xl active:scale-94 transition-transform tracking-widest"
-                    >
-                      CLAIM
-                    </Link>
-                  )
-                ) : null}
-              </div>
-            </li>
-          ))}
-
+        {/* Special row: project funding. Distinct from regular shop items — no pin star,
+            always at the top, full width. */}
+        <ul className="mt-6 w-full grid gap-4 grid-cols-1 auto-rows-[380px]">
           <li className="border-2 border-dark-brown bg-brown/60 relative h-[380px] w-full rounded-md text-dark-brown p-4 flex flex-col gap-2 hover:-translate-y-1 hover:shadow-sm hover:z-[1] transition-all duration-300 group">
             <span className="text-2xl font-bold leading-6 text-dark-brown pb-1 break-words min-w-0 line-clamp-2">
               Project funding
@@ -315,7 +243,16 @@ export default function ShopIndex({
                 <img src="/koi-gold.webp" alt="koi or gold" className="inline w-11 h-auto object-contain" />
               </div>
             </div>
-            {identityBlocked ? (
+            {!has_approved_project ? (
+              <div className="mt-auto group/grant relative">
+                <div className="w-full h-10 bg-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center cursor-not-allowed text-2xl">
+                  Request
+                </div>
+                <span className="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 w-max max-w-56 text-center rounded bg-dark-brown px-2 py-1 text-xs text-light-brown opacity-0 transition-opacity group-hover/grant:opacity-100">
+                  You need to have approved projects to redeem funding
+                </span>
+              </div>
+            ) : identityBlocked ? (
               <div className="mt-auto w-full h-10 bg-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center cursor-not-allowed text-base px-2 text-center">
                 {identity_gate?.state === 'verified_no_address'
                   ? 'Add address to request'
@@ -342,7 +279,7 @@ export default function ShopIndex({
               ? user_hours >= item.price
               : item.currency === 'gold'
                 ? gold_balance >= item.price
-                : koi_balance >= item.price
+                : koi_balance + gold_balance >= item.price
             const buyable = item.status === 'available' && canAfford
             const pinned = pinnedOrder.includes(item.id)
             const cardClass =
@@ -455,7 +392,7 @@ export default function ShopIndex({
                   </div>
                 ) : (
                   <div className="mt-auto w-full h-10 bg-brown border-2 border-dark-brown rounded-sm text-light-brown font-bold flex items-center justify-center cursor-not-allowed text-xl">
-                    Not enough {item.currency === 'gold' ? 'Gold' : 'Koi'}
+                    Not enough {item.currency === 'gold' ? 'Gold' : 'Koi/Gold'}
                   </div>
                 )}
               </li>
@@ -463,10 +400,8 @@ export default function ShopIndex({
           })}
         </ul>
         <p className="text-xs text-center text-brown w-full">
-          Prices and availability can change without notice depending on availability
-        </p>
-        <p className="text-xs text-center text-brown w-full font-bold">
-          Don't see what you're looking for? Suggest it in the Shop Items canvas!
+          Prices and availability can change without notice depending on availability. Hack Club is also unable to cover
+          customs/tariffs.
         </p>
       </div>
     </div>

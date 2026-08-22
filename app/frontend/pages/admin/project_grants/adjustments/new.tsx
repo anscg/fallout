@@ -64,6 +64,104 @@ function LedgerSnapshot({
   )
 }
 
+const CALC_INPUT_CLASS = 'w-full border border-input rounded-md px-2 py-1 text-xs font-mono'
+
+// Prorates a partial card refund back into koi/gold. Works off the order's FROZEN units
+// rather than today's rate — koi_to_cents_numerator may have moved since the order was
+// placed, so converting the returned dollars at the current rate would refund the wrong
+// amount. Floors the total (mirroring the ceil-on-charge convention in
+// HcbGrantSetting#koi_for_usd_cents, so the program never over-refunds) and returns gold
+// before koi, the inverse of the koi-first/gold-second charge order.
+function KoiRefundCalculator() {
+  const [frozenKoiInput, setFrozenKoiInput] = useState('')
+  const [frozenGoldInput, setFrozenGoldInput] = useState('')
+  const [orderDollars, setOrderDollars] = useState('')
+  const [returnedDollars, setReturnedDollars] = useState('')
+
+  const frozenKoi = Math.max(0, parseInt(frozenKoiInput, 10) || 0)
+  const frozenGold = Math.max(0, parseInt(frozenGoldInput, 10) || 0)
+  const orderCents = Math.round((parseFloat(orderDollars) || 0) * 100)
+  const returnedCents = Math.round((parseFloat(returnedDollars) || 0) * 100)
+  const totalUnits = frozenKoi + frozenGold
+
+  const ready = orderCents > 0 && returnedCents > 0 && totalUnits > 0
+  const overReturn = ready && returnedCents > orderCents
+  const refundUnits = ready && !overReturn ? Math.floor((totalUnits * returnedCents) / orderCents) : 0
+  const refundGold = Math.min(frozenGold, refundUnits)
+  const refundKoi = refundUnits - refundGold
+
+  return (
+    <div className="rounded-md border border-border bg-background p-2.5 space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block">
+          <span className="block text-[11px] text-muted-foreground mb-0.5">Order koi charged</span>
+          <input
+            type="number"
+            value={frozenKoiInput}
+            onChange={(e) => setFrozenKoiInput(e.target.value)}
+            placeholder="70"
+            className={CALC_INPUT_CLASS}
+          />
+        </label>
+        <label className="block">
+          <span className="block text-[11px] text-muted-foreground mb-0.5">Order gold charged</span>
+          <input
+            type="number"
+            value={frozenGoldInput}
+            onChange={(e) => setFrozenGoldInput(e.target.value)}
+            placeholder="0"
+            className={CALC_INPUT_CLASS}
+          />
+        </label>
+        <label className="block">
+          <span className="block text-[11px] text-muted-foreground mb-0.5">Order total ($)</span>
+          <input
+            type="number"
+            step="0.01"
+            value={orderDollars}
+            onChange={(e) => setOrderDollars(e.target.value)}
+            placeholder="50.00"
+            className={CALC_INPUT_CLASS}
+          />
+        </label>
+        <label className="block">
+          <span className="block text-[11px] text-muted-foreground mb-0.5">Returned to org ($)</span>
+          <input
+            type="number"
+            step="0.01"
+            value={returnedDollars}
+            onChange={(e) => setReturnedDollars(e.target.value)}
+            placeholder="30.00"
+            className={CALC_INPUT_CLASS}
+          />
+        </label>
+      </div>
+
+      {overReturn ? (
+        <p className="text-red-700">
+          Returned amount is larger than the order total — check the figures. A card can hold top-ups from several
+          orders; prorate against whichever order you're actually unwinding.
+        </p>
+      ) : refundUnits > 0 ? (
+        <div className="rounded-md border border-primary bg-primary/5 p-2 space-y-1">
+          <div className="font-mono">
+            floor(({frozenKoi} + {frozenGold}) × {returnedCents} ÷ {orderCents}) = <strong>{refundUnits}</strong> units
+          </div>
+          <div>
+            Credit <strong>{refundGold} gold</strong> and <strong>{refundKoi} koi</strong> on{' '}
+            <Link href="/admin/koi_transactions/new" className="text-primary hover:underline">
+              the koi/gold adjustment page
+            </Link>
+            .
+          </div>
+        </div>
+      ) : (
+        <p className="text-muted-foreground">Fill all four fields to compute the split.</p>
+      )}
+    </div>
+  )
+}
+
 export default function AdminProjectGrantsAdjustmentsNew({
   prefill_user_id,
   idempotency_key,
@@ -295,6 +393,85 @@ export default function AdminProjectGrantsAdjustmentsNew({
             is now cancelled — so it shows a $0 baseline and will flag a misleading "creates a gap" / "missing from HCB"
             warning for this entry. <strong>Disregard it.</strong> A closed card legitimately diverges from the ledger
             and isn't tracked; the adjustment still records and settles correctly.
+          </p>
+        </div>
+      </details>
+
+      <details className="mb-6 rounded-md border border-border bg-muted/30">
+        <summary className="cursor-pointer px-4 py-2 text-sm font-medium select-none">
+          How to refund an unspent card balance back into koi/gold
+        </summary>
+        <div className="px-4 pb-4 pt-1 text-xs space-y-3">
+          <p>
+            A user got a card, spent part of it, and wants the rest back as <strong>koi/gold</strong> instead of
+            dollars. There's no automated path — the dollars and the koi live in two separate ledgers, and each half is
+            a manual step on a different page. Do all three, in order.
+          </p>
+
+          <div>
+            <div className="font-semibold mb-1">The trap: refunding both halves pays the user twice</div>
+            <p className="text-muted-foreground">
+              When a card closes, Fallout auto-books an <code>out</code> row that{' '}
+              <strong>replenishes the user's funding</strong> — the returned dollars stay spendable on their next order.
+              That's right when the money stays in USD. Here it isn't: you're handing those same dollars back as koi.
+              Leave the auto-refund alone and the user gets the koi <em>and</em> the entitlement.
+            </p>
+          </div>
+
+          <div>
+            <div className="font-semibold mb-1">1. Move the real money on HCB</div>
+            <p className="text-muted-foreground">
+              Nothing in Fallout initiates this — do it on the HCB dashboard. Either <strong>cancel the card</strong>{' '}
+              (returns the whole unspent balance; irreversible, so issue a new card if they still need to spend) or{' '}
+              <strong>withdraw part of it</strong>. Cancel is the well-trodden path.
+            </p>
+          </div>
+
+          <div>
+            <div className="font-semibold mb-1">2. Cancel the entitlement (this form)</div>
+            <p className="text-muted-foreground mb-1">
+              <strong>If you cancelled:</strong> wait for the auto-refund to land (≤15 min — its note records the exact
+              unspent figure), then book the mirror of it here:
+            </p>
+            <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+              <li>
+                Direction = <code>in</code>
+              </li>
+              <li>
+                Amount = the <strong>returned</strong> balance (same figure as the auto-booked <code>out</code>)
+              </li>
+              <li>
+                <strong>Count towards issued funding = checked</strong>
+              </li>
+              <li>Note citing the order being unwound and the koi/gold credit from step 3</li>
+            </ul>
+            <p className="text-muted-foreground mt-1">
+              That nets the pair to zero, so the returned dollars don't come back as spendable funding.{' '}
+              <strong>If you withdrew instead of cancelling</strong>, nothing auto-books — record a single{' '}
+              <code>out</code> for the withdrawn amount with <strong>count towards issued funding unchecked</strong>.
+              Same net effect in one row: the card ledger matches HCB, the entitlement doesn't move.
+            </p>
+          </div>
+
+          <div>
+            <div className="font-semibold mb-1">3. Credit the koi/gold</div>
+            <p className="text-muted-foreground mb-2">
+              Leave the order <code>fulfilled</code> — rejecting it refunds <em>all</em> of its koi and pulls the full
+              amount out of <code>expected</code>, which cascades into more corrections. Prorate instead, off the units
+              the order actually froze:
+            </p>
+            <KoiRefundCalculator />
+            <p className="text-muted-foreground mt-2">
+              Gold comes back before koi (the inverse of the koi-first charge order), and the total floors so the
+              program never over-refunds. Cite the order id, the card, and the dollar amount in the description so the
+              two ledgers can be reconciled later.
+            </p>
+          </div>
+
+          <p className="text-muted-foreground italic">
+            Heads up: steps 1–2 need the <code>hcb</code> role, step 3 only needs <code>admin</code> — nothing ties them
+            together, so a half-finished refund won't warn you. If the card was cancelled, the preview below also shows
+            a $0 baseline and a misleading gap warning; disregard it, same as for a reimbursement.
           </p>
         </div>
       </details>

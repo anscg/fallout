@@ -2,12 +2,10 @@ class Admin::ShipsController < Admin::ApplicationController
   before_action :set_ship, only: %i[show]
 
   def index
-    @pagy, @ships = pagy(policy_scope(Ship).includes(:project, :reviewer, project: :user).order(created_at: :desc))
-
-    render inertia: {
-      ships: @ships.map { |s| serialize_ship_row(s) },
-      pagy: pagy_props(@pagy)
-    }
+    # policy_scope runs on the critical path so verify_policy_scoped passes on the initial
+    # (deferred) render; it's lazy, so no query fires until the deferred loader enumerates it.
+    scope = policy_scope(Ship)
+    render inertia: deferred_index_props(scope)
   end
 
   def show
@@ -19,6 +17,22 @@ class Admin::ShipsController < Admin::ApplicationController
   end
 
   private
+
+  # Memoized loader shared by the deferred index props so the heavy query runs once per
+  # deferred request even though ships/pagy are separate Inertia props.
+  def deferred_index_props(scope)
+    memo = nil
+    load = lambda do
+      memo ||= begin
+        @pagy, @ships = pagy(scope.includes(:project, :reviewer, project: :user).order(created_at: :desc))
+        { ships: @ships.map { |s| serialize_ship_row(s) }, pagy: pagy_props(@pagy) }
+      end
+    end
+    {
+      ships: InertiaRails.defer(group: "index") { load.call[:ships] },
+      pagy: InertiaRails.defer(group: "index") { load.call[:pagy] }
+    }
+  end
 
   def set_ship
     @ship = Ship.includes(:time_audit_review, :requirements_check_review, :design_review, :build_review, project: :user).find(params[:id])

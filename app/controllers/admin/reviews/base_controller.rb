@@ -1,4 +1,6 @@
 class Admin::Reviews::BaseController < Admin::ApplicationController
+  include ReviewerNoteSerialization
+
   # No index action on base — override verify_authorized/verify_policy_scoped to avoid ActionNotFound
   skip_after_action :verify_authorized
   skip_after_action :verify_policy_scoped
@@ -99,6 +101,28 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
     "review_sort:#{params[:controller]}"
   end
 
+  # Whether the "users that can get a ticket" filter is active. Persisted in session (like
+  # sort) so it survives PATCH/redirect cycles where the query param isn't re-sent.
+  def parse_ticket_filter
+    session[review_ticket_filter_session_key] = params[:ticket] if params[:ticket].in?(%w[eligible all])
+    session[review_ticket_filter_session_key] == "eligible"
+  end
+
+  def review_ticket_filter_session_key
+    "review_ticket_filter:#{params[:controller]}"
+  end
+
+  # Restricts the pending queue to ships whose owner is on track for a summit ticket — i.e. has
+  # SUBMITTED (shipped, pre-approval) hours >= their per-user override (else the default). Uses
+  # submitted rather than approved hours so reviewers can prioritise owners whose hours are still
+  # in review. Owner User records are already loaded via the index `includes`, so only the
+  # shipped-hours aggregation runs here — computed once per distinct owner.
+  def filter_ticket_eligible(reviews)
+    owners = reviews.map { |r| r.ship.project.user }.uniq(&:id)
+    eligible_ids = owners.select(&:submitted_ticket_hours?).map(&:id).to_set
+    reviews.select { |r| eligible_ids.include?(r.ship.project.user_id) }
+  end
+
   # Flagged projects are visible in the All table but excluded from the pending queue
   def flagged_ship_ids
     Ship.where(project_id: ProjectFlag.select(:project_id)).select(:id)
@@ -155,22 +179,6 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
     end.sort_by { |updated_at, _| -updated_at.to_i }.map(&:last)
   end
 
-  def serialize_reviewer_notes(project)
-    project.reviewer_notes.includes(:user).order(created_at: :desc).map do |note|
-      {
-        id: note.id,
-        body: note.body,
-        ship_id: note.ship_id,
-        review_stage: note.review_stage,
-        author_display_name: note.user.display_name,
-        author_avatar: note.user.avatar,
-        author_id: note.user_id,
-        created_at: note.created_at.iso8601,
-        updated_at: note.updated_at.iso8601
-      }
-    end
-  end
-
   def precompute_user_lifetime_hours(reviews)
     user_ids = reviews.map { |r| r.ship.project.user_id }.uniq
     return {} if user_ids.empty?
@@ -182,18 +190,17 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
     seconds_by_user.transform_values { |s| s > 0 ? (s / 3600.0).round(1) : nil }
   end
 
-  # Orders the pending queue. :hours sorts by the owner's lifetime approved hours (desc); otherwise
-  # by real wait with a +WAIT_BOOST handicap for priority ships (effective longest-waiting first).
-  # The boost only shifts ordering — actual wait times are unchanged.
-  def sort_pending(reviews, sort, lifetime_hours, priority_ship_ids)
+  # Orders the pending queue. :hours sorts by the owner's lifetime approved hours (desc);
+  # otherwise by real wait (longest-waiting first).
+  def sort_pending(reviews, sort, lifetime_hours)
     if sort == :hours
       reviews.sort_by { |r| -(lifetime_hours[r.ship.project.user_id] || -1) }
     else
-      reviews.sort_by { |r| r.ship.created_at - (priority_ship_ids.include?(r.ship.id) ? ReviewPriorityCalculator::WAIT_BOOST : 0) }
+      reviews.sort_by { |r| r.ship.created_at }
     end
   end
 
-  def serialize_review_row(review, flagged_project_ids: Set.new, previously_reviewed_project_ids: Set.new, user_lifetime_hours: {}, priority_ship_ids: Set.new)
+  def serialize_review_row(review, flagged_project_ids: Set.new, previously_reviewed_project_ids: Set.new, user_lifetime_hours: {})
     ship = review.ship
     sibling = review.is_a?(TimeAuditReview) ? ship.requirements_check_review : ship.time_audit_review
     {
@@ -212,8 +219,7 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
       sibling_approved: sibling&.approved? || false,
       requirements_check_reviewer_display_name: review.is_a?(DesignReview) ? ship.requirements_check_review&.reviewer&.display_name : nil,
       previously_reviewed_by_me: previously_reviewed_project_ids.include?(ship.project_id),
-      approved_public_hours: user_lifetime_hours[ship.project.user_id],
-      priority: priority_ship_ids.include?(ship.id)
+      approved_public_hours: user_lifetime_hours[ship.project.user_id]
     }
   end
 
@@ -262,6 +268,7 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
       user_slack_id: project.user.slack_id, # Admin-only context; review pages are staff-only
       collaborators: project.collaborator_users.map { |u| { id: u.id, display_name: u.display_name, avatar: u.avatar } },
       logged_hours: logged,
+      ship_logged_hours: ship.total_hours, # This cycle's logged hours only (logged_hours is project-wide)
       approved_public_hours: public_hrs,
       approved_internal_hours: internal_hrs,
       entry_count: entry_count,
@@ -292,7 +299,7 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
     }
   end
 
-  def serialize_journal_entry(journal_entry, time_audit)
+  def serialize_journal_entry(journal_entry, time_audit, ship)
     annotations = time_audit&.annotations || {}
     recording_annotations = annotations["recordings"] || {}
 
@@ -336,7 +343,8 @@ class Admin::Reviews::BaseController < Admin::ApplicationController
       created_at: journal_entry.created_at.strftime("%b %d, %Y"),
       total_duration: total_duration,
       approved_duration: approved_duration,
-      recordings: recordings_summary
+      recordings: recordings_summary,
+      in_ship: journal_entry.ship_id == ship.id # Entry was claimed by the ship under review (vs an older ship)
     }
   end
 

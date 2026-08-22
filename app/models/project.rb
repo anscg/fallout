@@ -26,6 +26,7 @@
 #  index_projects_on_discarded_at                  (discarded_at)
 #  index_projects_on_is_unlisted                   (is_unlisted)
 #  index_projects_on_name_trgm                     (name) USING gin
+#  index_projects_on_search_tsvector               (((to_tsvector('simple'::regconfig, COALESCE((name)::text, ''::text)) || to_tsvector('simple'::regconfig, COALESCE(description, ''::text))))) USING gin
 #  index_projects_on_tags                          (tags) USING gin
 #  index_projects_on_unified_thumbnail_checked_at  (unified_thumbnail_checked_at)
 #  index_projects_on_user_id                       (user_id)
@@ -91,12 +92,13 @@ class Project < ApplicationRecord
   has_many :pending_collaboration_invites, -> { kept }, dependent: :destroy
   has_many :reviewer_notes, dependent: :destroy
   has_many :project_flags, dependent: :destroy
+  has_many :project_time_audits, dependent: :destroy # Ad-hoc admin audits; carry no reviewable state
 
   # Cached, pre-rasterized zine/poster image used as the project's cover on the
   # bulletin board explore feed and the public /api/v1/explore API. Populated
   # by ComputeProjectUnifiedThumbnailJob (zine source URL discovered via
   # ShipChecks::UnifiedScreenshotFinder, then transcoded to JPEG via
-  # ShipChecks::UnifiedScreenshotProcessor which also handles PDF rasterization).
+  # ShipChecks::UnifiedScreenshotProcessor — raster plus PDF, no SVG).
   has_one_attached :unified_thumbnail
 
   def discard
@@ -248,8 +250,8 @@ class Project < ApplicationRecord
   end
 
   # Shipped counterpart of batch_user_logged_seconds: the user's attributed share of journal
-  # time on journals attached to a ship (any status), per project. Excludes manual_seconds —
-  # project-level manual time isn't tied to a ship.
+  # time on journals attached to a ship (any status), per project. manual_seconds are always
+  # included — they're admin-set hours that can't be tied to a ship but count regardless.
   def self.batch_user_shipped_seconds(project_ids, user)
     return {} if project_ids.empty? || user.nil?
 
@@ -260,6 +262,16 @@ class Project < ApplicationRecord
 
     result = Hash.new(0)
     user_seconds_by_je.each { |je_id, secs| result[project_by_je[je_id]] += secs }
+
+    member_counts = batch_member_counts(project_ids)
+    manuals = where(id: project_ids).pluck(:id, :manual_seconds).to_h
+    member_pids = project_ids_user_is_member_of(project_ids, user)
+    project_ids.each do |pid|
+      next unless member_pids.include?(pid)
+      mc = member_counts[pid].to_i
+      result[pid] += manuals[pid].to_i / mc if mc.positive?
+    end
+
     result
   end
 

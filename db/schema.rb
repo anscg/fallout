@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_29_182032) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_trgm"
@@ -98,6 +98,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
 
   create_table "build_reviews", force: :cascade do |t|
     t.jsonb "annotations"
+    t.datetime "backfill_claim_expires_at"
+    t.bigint "backfill_reviewer_id"
     t.datetime "claim_expires_at"
     t.datetime "completed_at"
     t.datetime "created_at", null: false
@@ -112,9 +114,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.bigint "ship_id", null: false
     t.integer "status", default: 0, null: false
     t.datetime "updated_at", null: false
+    t.index ["backfill_reviewer_id"], name: "index_build_reviews_on_backfill_reviewer_id"
     t.index ["completed_at"], name: "index_build_reviews_on_completed_at"
     t.index ["reviewer_id"], name: "index_build_reviews_on_reviewer_id"
     t.index ["ship_id"], name: "index_build_reviews_on_ship_id", unique: true
+    t.index ["status", "backfill_claim_expires_at"], name: "index_build_reviews_on_status_and_backfill_claim_expires_at"
     t.index ["status", "claim_expires_at"], name: "index_build_reviews_on_status_and_claim_expires_at"
     t.index ["status"], name: "index_build_reviews_on_status"
   end
@@ -172,8 +176,36 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.index ["user_id"], name: "index_critters_on_user_id"
   end
 
+  create_table "debt_check_ins", force: :cascade do |t|
+    t.bigint "author_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "discarded_at"
+    t.text "note", null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["author_id"], name: "index_debt_check_ins_on_author_id"
+    t.index ["discarded_at"], name: "index_debt_check_ins_on_discarded_at"
+    t.index ["user_id", "created_at"], name: "index_debt_check_ins_on_user_id_and_created_at"
+    t.index ["user_id"], name: "index_debt_check_ins_on_user_id"
+  end
+
+  create_table "debt_snapshots", force: :cascade do |t|
+    t.integer "approved_seconds", default: 0, null: false
+    t.jsonb "approved_seconds_by_project", default: {}, null: false
+    t.datetime "computed_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "cutoff_at", null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["cutoff_at"], name: "index_debt_snapshots_on_cutoff_at"
+    t.index ["user_id", "cutoff_at"], name: "index_debt_snapshots_on_user_id_and_cutoff_at", unique: true
+    t.index ["user_id"], name: "index_debt_snapshots_on_user_id"
+  end
+
   create_table "design_reviews", force: :cascade do |t|
     t.jsonb "annotations"
+    t.datetime "backfill_claim_expires_at"
+    t.bigint "backfill_reviewer_id"
     t.string "checkpoint_message_url"
     t.datetime "claim_expires_at"
     t.datetime "completed_at"
@@ -189,9 +221,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.bigint "ship_id", null: false
     t.integer "status", default: 0, null: false
     t.datetime "updated_at", null: false
+    t.index ["backfill_reviewer_id"], name: "index_design_reviews_on_backfill_reviewer_id"
     t.index ["completed_at"], name: "index_design_reviews_on_completed_at"
     t.index ["reviewer_id"], name: "index_design_reviews_on_reviewer_id"
     t.index ["ship_id"], name: "index_design_reviews_on_ship_id", unique: true
+    t.index ["status", "backfill_claim_expires_at"], name: "index_design_reviews_on_status_and_backfill_claim_expires_at"
     t.index ["status", "claim_expires_at"], name: "index_design_reviews_on_status_and_claim_expires_at"
     t.index ["status"], name: "index_design_reviews_on_status"
   end
@@ -249,6 +283,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.index ["actor_id"], name: "index_gold_transactions_on_actor_id"
+    t.index ["created_at"], name: "index_gold_transactions_on_created_at"
     t.index ["ship_id", "user_id"], name: "index_gold_transactions_on_built_irl_conversion_uniqueness", unique: true, where: "(((reason)::text = 'built_irl_conversion'::text) AND (ship_id IS NOT NULL))"
     t.index ["ship_id", "user_id"], name: "index_gold_transactions_on_ship_review_uniqueness", unique: true, where: "(((reason)::text = 'ship_review'::text) AND (ship_id IS NOT NULL))"
     t.index ["ship_id"], name: "index_gold_transactions_on_ship_id"
@@ -365,6 +400,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.bigint "ship_id"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
+    t.index "to_tsvector('simple'::regconfig, COALESCE(content, ''::text))", name: "index_journal_entries_on_search_tsvector", using: :gin
     t.index ["discarded_at"], name: "index_journal_entries_on_discarded_at"
     t.index ["project_id"], name: "index_journal_entries_on_project_id"
     t.index ["ship_id"], name: "index_journal_entries_on_ship_id"
@@ -381,6 +417,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.uuid "transfer_id"
     t.bigint "user_id", null: false
     t.index ["actor_id"], name: "index_koi_transactions_on_actor_id"
+    t.index ["created_at"], name: "index_koi_transactions_on_created_at"
     t.index ["ship_id", "user_id"], name: "index_koi_transactions_on_built_irl_conversion_uniqueness", unique: true, where: "(((reason)::text = 'built_irl_conversion'::text) AND (ship_id IS NOT NULL))"
     t.index ["ship_id", "user_id"], name: "index_koi_transactions_on_ship_review_uniqueness", unique: true, where: "(((reason)::text = 'ship_review'::text) AND (ship_id IS NOT NULL))"
     t.index ["transfer_id"], name: "index_koi_transactions_on_transfer_id", where: "(transfer_id IS NOT NULL)"
@@ -558,7 +595,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.index ["discarded_at"], name: "index_project_grant_orders_on_discarded_at"
     t.index ["state"], name: "index_project_grant_orders_on_state"
     t.index ["user_id"], name: "index_project_grant_orders_on_user_id"
-    t.check_constraint "frozen_koi_amount > 0", name: "project_grant_orders_frozen_koi_amount_positive"
+    t.check_constraint "frozen_koi_amount >= 0", name: "project_grant_orders_frozen_koi_amount_positive"
     t.check_constraint "frozen_usd_cents > 0", name: "project_grant_orders_frozen_usd_cents_positive"
   end
 
@@ -586,6 +623,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.index ["user_id"], name: "index_project_grant_warnings_on_user_id"
   end
 
+  create_table "project_time_audits", force: :cascade do |t|
+    t.jsonb "annotations", default: {}, null: false
+    t.integer "computed_seconds"
+    t.datetime "created_at", null: false
+    t.bigint "created_by_id", null: false
+    t.string "label"
+    t.bigint "last_edited_by_id"
+    t.bigint "project_id", null: false
+    t.datetime "saved_at"
+    t.string "token", null: false
+    t.datetime "updated_at", null: false
+    t.index ["created_by_id"], name: "index_project_time_audits_on_created_by_id"
+    t.index ["last_edited_by_id"], name: "index_project_time_audits_on_last_edited_by_id"
+    t.index ["project_id"], name: "index_project_time_audits_on_project_id"
+    t.index ["token"], name: "index_project_time_audits_on_token", unique: true
+  end
+
   create_table "projects", force: :cascade do |t|
     t.boolean "built_irl", default: false, null: false
     t.datetime "created_at", null: false
@@ -604,6 +658,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.string "unified_thumbnail_source_url"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
+    t.index "((to_tsvector('simple'::regconfig, COALESCE((name)::text, ''::text)) || to_tsvector('simple'::regconfig, COALESCE(description, ''::text))))", name: "index_projects_on_search_tsvector", using: :gin
     t.index ["discarded_at"], name: "index_projects_on_discarded_at"
     t.index ["is_unlisted"], name: "index_projects_on_is_unlisted"
     t.index ["name"], name: "index_projects_on_name_trgm", opclass: :gin_trgm_ops, using: :gin
@@ -732,15 +787,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
   end
 
   create_table "shop_orders", force: :cascade do |t|
-    t.text "address"
     t.text "admin_note"
     t.datetime "created_at", null: false
+    t.integer "frozen_gold_amount", default: 0, null: false
+    t.integer "frozen_koi_amount", null: false
     t.integer "frozen_price", null: false
+    t.text "legacy_address"
     t.text "phone"
     t.integer "quantity", default: 1, null: false
     t.text "selected_dates", default: [], array: true
     t.bigint "shop_item_id", null: false
     t.string "state", default: "pending", null: false
+    t.text "structured_address"
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
     t.index ["shop_item_id"], name: "index_shop_orders_on_shop_item_id"
@@ -983,13 +1041,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.text "ban_reason"
     t.string "ban_type"
     t.text "bio"
+    t.string "certificate_token"
     t.string "country"
     t.datetime "created_at", null: false
+    t.datetime "debt_hidden_at"
+    t.bigint "debt_hidden_by_id"
     t.text "device_token"
     t.datetime "discarded_at"
     t.string "display_name", null: false
     t.string "email", null: false
+    t.boolean "excluded_from_dashboard", default: false, null: false
     t.boolean "excluded_from_reviewer_suggestions", default: false, null: false
+    t.date "excluded_until"
     t.string "first_name"
     t.boolean "has_hca_address", default: false, null: false
     t.string "hca_id"
@@ -1003,6 +1066,10 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.string "pending_lookout_tokens", default: [], null: false, array: true
     t.datetime "professor_enrolled_at"
     t.string "pronouns"
+    t.boolean "reduced_expectations", default: false, null: false
+    t.string "reduced_expectations_reason"
+    t.decimal "reduced_expectations_target"
+    t.date "reduced_expectations_until"
     t.string "roles", default: [], null: false, array: true
     t.string "slack_id"
     t.text "slack_token"
@@ -1015,6 +1082,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.string "type"
     t.datetime "updated_at", null: false
     t.string "verification_status"
+    t.index "((to_tsvector('simple'::regconfig, COALESCE((display_name)::text, ''::text)) || to_tsvector('simple'::regconfig, COALESCE((email)::text, ''::text))))", name: "index_users_on_search_tsvector", using: :gin
+    t.index ["certificate_token"], name: "index_users_on_certificate_token", unique: true
+    t.index ["debt_hidden_by_id"], name: "index_users_on_debt_hidden_by_id"
     t.index ["device_token"], name: "index_users_on_device_token"
     t.index ["discarded_at"], name: "index_users_on_discarded_at"
     t.index ["email"], name: "index_users_unique_verified_email", unique: true, where: "((type IS NULL) AND (discarded_at IS NULL))"
@@ -1049,10 +1119,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
     t.jsonb "inactive_segments", default: []
     t.datetime "last_refreshed_at"
     t.string "live_broadcast_content"
+    t.datetime "processed_at"
+    t.text "processing_error"
+    t.integer "processing_progress", default: 0, null: false
+    t.integer "processing_status", default: 6, null: false
     t.datetime "published_at"
     t.integer "stretch_multiplier", default: 1, null: false
     t.text "tags"
     t.string "thumbnail_url"
+    t.bigint "timelapse_byte_size"
+    t.string "timelapse_checksum"
+    t.integer "timelapse_duration_seconds"
     t.string "title"
     t.datetime "updated_at", null: false
     t.string "video_id", null: false
@@ -1063,6 +1140,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
   add_foreign_key "active_storage_attachments", "active_storage_blobs", column: "blob_id"
   add_foreign_key "active_storage_variant_records", "active_storage_blobs", column: "blob_id"
   add_foreign_key "build_reviews", "ships"
+  add_foreign_key "build_reviews", "users", column: "backfill_reviewer_id"
   add_foreign_key "build_reviews", "users", column: "reviewer_id"
   add_foreign_key "collaboration_invites", "projects"
   add_foreign_key "collaboration_invites", "users", column: "invitee_id"
@@ -1070,7 +1148,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
   add_foreign_key "collaborators", "users"
   add_foreign_key "critters", "journal_entries"
   add_foreign_key "critters", "users"
+  add_foreign_key "debt_check_ins", "users"
+  add_foreign_key "debt_check_ins", "users", column: "author_id"
+  add_foreign_key "debt_snapshots", "users"
   add_foreign_key "design_reviews", "ships"
+  add_foreign_key "design_reviews", "users", column: "backfill_reviewer_id"
   add_foreign_key "design_reviews", "users", column: "reviewer_id"
   add_foreign_key "dialog_campaigns", "users"
   add_foreign_key "featured_projects", "projects"
@@ -1112,6 +1194,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
   add_foreign_key "project_grant_warnings", "project_grant_orders"
   add_foreign_key "project_grant_warnings", "users"
   add_foreign_key "project_grant_warnings", "users", column: "resolved_by_id"
+  add_foreign_key "project_time_audits", "projects"
+  add_foreign_key "project_time_audits", "users", column: "created_by_id"
+  add_foreign_key "project_time_audits", "users", column: "last_edited_by_id"
   add_foreign_key "projects", "users"
   add_foreign_key "recordings", "journal_entries"
   add_foreign_key "recordings", "users"
@@ -1142,4 +1227,5 @@ ActiveRecord::Schema[8.1].define(version: 2026_06_13_000000) do
   add_foreign_key "ticket_claims", "users"
   add_foreign_key "time_audit_reviews", "ships"
   add_foreign_key "time_audit_reviews", "users", column: "reviewer_id"
+  add_foreign_key "users", "users", column: "debt_hidden_by_id"
 end

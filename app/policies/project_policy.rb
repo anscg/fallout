@@ -1,6 +1,17 @@
 # frozen_string_literal: true
 
 class ProjectPolicy < ApplicationPolicy
+  # On/after this instant, the :limit_reships flag caps a project at one returned-ship resubmission
+  # (see #return_reship_limit_reached?).
+  RESHIP_LIMIT_CUTOFF = ActiveSupport::TimeZone["America/New_York"].local(2026, 6, 21)
+
+  # A Blueprint/Stasis transfer made after this instant waives the :disable_new_submissions kill switch
+  # (see #recent_transfer? — late transferees still get their first submission).
+  TRANSFER_WAIVER_CUTOFF = ActiveSupport::TimeZone["America/New_York"].local(2026, 6, 17)
+
+  # Identifies the journal entry the importer writes to mark a Blueprint/Stasis transfer.
+  TRANSFER_MARKER = /\AProject transferred from (Blueprint|Stasis)!/
+
   def index?
     true
   end
@@ -62,7 +73,27 @@ class ProjectPolicy < ApplicationPolicy
     return false if record.ships.where(status: %i[pending awaiting_identity]).exists? # Block while a submission is queued or held for identity verification
     return false unless user.present?
 
+    # Kill switch for first-time submissions: when :disable_new_submissions is on, projects that have
+    # never been shipped are blocked, unless the user is granted the :new_submissions_override actor flag
+    # or the project was transferred from Blueprint/Stasis after TRANSFER_WAIVER_CUTOFF (late transferees
+    # still deserve their first submission).
+    if !record.ships.exists? && Flipper.enabled?(:disable_new_submissions) && !Flipper.enabled?(:new_submissions_override, user) && !recent_transfer?
+      return false
+    end
+
+    return false if return_reship_limit_reached? # Resubmitting a returned ship is capped post-cutoff under :limit_reships
+
     !user.trial? && owner? # Only verified project owners can submit for review
+  end
+
+  def reship?
+    return false if record.discarded?
+    return false unless record.ships.where(status: :pending).exists? # Only an in-queue submission can be pulled back and re-shipped
+    return false unless user.present?
+
+    # Note: abandon-pending reships are intentionally NOT subject to :limit_reships — only returned-ship
+    # resubmissions (handled in #ship?) count toward the post-cutoff cap.
+    !user.trial? && owner? # Same gate as ship? — verified owners only
   end
 
   def refresh_cover?
@@ -76,6 +107,30 @@ class ProjectPolicy < ApplicationPolicy
     return false unless user.present? && !user.trial? && collaborators_enabled?
 
     owner? # Only verified project owners manage collaborators from the user-facing project page.
+  end
+
+  private
+
+  # True when this project carries a Blueprint/Stasis transfer marker journal entry created after
+  # TRANSFER_WAIVER_CUTOFF. Used to waive the :disable_new_submissions kill switch for late transferees.
+  def recent_transfer?
+    record.kept_journal_entries
+          .where("created_at > ?", TRANSFER_WAIVER_CUTOFF)
+          .any? { |entry| entry.content&.match?(TRANSFER_MARKER) }
+  end
+
+  # When :limit_reships is on, a project may resubmit a RETURNED ship at most once on/after
+  # RESHIP_LIMIT_CUTOFF. The first post-cutoff return-resubmission is allowed; any subsequent one is
+  # blocked. Abandon-pending reships (the Reship! button — preceding ship superseded, not returned) don't
+  # count and stay unlimited; first-time submissions are governed by :disable_new_submissions.
+  def return_reship_limit_reached?
+    return false unless Flipper.enabled?(:limit_reships)
+    return false if Flipper.enabled?(:reship_limit_override, user) # Per-user exemption from the cap
+
+    ships = record.ships.order(:created_at).to_a
+    # A return-resubmission is a ship whose immediately-preceding ship had been returned. Count those
+    # created on/after the cutoff — one is allowed, so the cap is reached once a prior one already exists.
+    ships.each_cons(2).count { |prev, ship| ship.created_at >= RESHIP_LIMIT_CUTOFF && prev.status == "returned" } >= 1
   end
 
   class Scope < ApplicationPolicy::Scope

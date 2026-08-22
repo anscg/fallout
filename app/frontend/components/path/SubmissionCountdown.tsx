@@ -45,8 +45,8 @@ function compactDisplay({ days, hours, mins, secs }: Split): string {
 }
 
 function ariaLabel(split: Split, tier: Tier): string {
-  if (tier === 'closed') return '60-hour deadline passed'
-  return `60-hour deadline in ${split.days} days, ${split.hours} hours, ${split.mins} minutes, ${split.secs} seconds`
+  if (tier === 'closed') return 'Submission deadline passed'
+  return `Final submission deadline in ${split.days} days, ${split.hours} hours, ${split.mins} minutes, ${split.secs} seconds`
 }
 
 function useExpanded(disabled: boolean, canHover: boolean) {
@@ -294,7 +294,7 @@ export default function SubmissionCountdown() {
                   transition={contentTransition}
                   className={`whitespace-nowrap text-[10px] xs:text-xs uppercase tracking-[0.24em] ${titleColor}`}
                 >
-                  60-hour deadline in
+                  Final submission deadline in
                 </motion.span>
               ) : (
                 <motion.span

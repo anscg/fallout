@@ -86,6 +86,8 @@ class ProjectsController < ApplicationController
         export_journal: project_policy.export_journal?,
         share: project_policy.share?, # Gates the "Copy share link" overflow menu item — true only for listed, non-discarded projects
         ship: project_policy.ship?,
+        reship: project_policy.reship?, # Gates the "RESHIP!" action on a pending submission
+
         manage_collaborators: collab_enabled && project_policy.manage_collaborators?,
         refresh_cover: project_policy.refresh_cover?, # Gates the owner-only "Check for my zine" cover action
         # JournalEntriesController only allows trial access on :preview — exclude trial users so they fall through to the locked button below.
@@ -287,6 +289,7 @@ class ProjectsController < ApplicationController
       description: project.description,
       demo_link: project.demo_link,
       repo_link: project.repo_link,
+      built_irl: project.built_irl?, # Picks the design vs build requirements doc in the reship warning
       is_unlisted: project.is_unlisted,
       tags: project.tags,
       user_display_name: project.user.display_name,
@@ -305,12 +308,13 @@ class ProjectsController < ApplicationController
 
   def serialize_journal_entry_card(journal_entry, content_html)
     content = journal_entry.content.to_s
-    is_blueprint_transfer = content.start_with?("Project transferred from Blueprint!")
+    transfer_match = content.match(/\AProject transferred from (Blueprint|Stasis)!/)
     hours_match = content.match(/Duration Transferred: ([\d.]+)h/)
     {
       id: journal_entry.id,
       content_html: content_html,
-      is_blueprint_transfer: is_blueprint_transfer,
+      is_blueprint_transfer: transfer_match.present?,
+      transfer_source: transfer_match&.[](1),
       blueprint_hours: hours_match ? hours_match[1].to_f : nil,
       images: journal_entry.images.map { |img| url_for(img) },
       recordings_count: policy(journal_entry).show? ? journal_entry.recordings.size : 0, # Only expose recording count to entry author/owner/collaborator

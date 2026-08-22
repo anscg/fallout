@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { useMemo, useState } from 'react'
 import { Link, router, usePage } from '@inertiajs/react'
-import { Cog, Plus } from 'lucide-react'
+import { Cog, Plus, Wallet } from 'lucide-react'
 import AdminLayout from '@/layouts/AdminLayout'
 import { Badge } from '@/components/admin/ui/badge'
 import { Button } from '@/components/admin/ui/button'
@@ -244,6 +244,14 @@ export default function AdminProjectGrantsOrdersIndex({
             <Button asChild variant="outline" size="sm">
               <Link href="/admin/project_grants/adjustments/new">
                 <Plus className="w-4 h-4 mr-1" /> Adjustment
+              </Link>
+            </Button>
+          )}
+          {/* hcb-gated: the report exposes per-user delta figures and its row actions move money */}
+          {is_hcb && (
+            <Button asChild variant="outline" size="sm">
+              <Link href="/admin/project_grants/unissued_funds">
+                <Wallet className="w-4 h-4 mr-1" /> Unissued funds
               </Link>
             </Button>
           )}

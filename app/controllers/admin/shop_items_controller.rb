@@ -3,25 +3,16 @@ class Admin::ShopItemsController < Admin::ApplicationController
   before_action :set_shop_item, only: [ :edit, :update, :destroy ]
 
   def index
+    # All items are sent once; search + filtering happen client-side for instant feedback.
     items = policy_scope(ShopItem)
-
-    if params[:q].present?
-      term = "%#{ActiveRecord::Base.sanitize_sql_like(params[:q])}%"
-      items = items.where("name ILIKE :t OR description ILIKE :t", t: term)
-    end
-    items = items.where(status: params[:status]) if ShopItem::STATUSES.include?(params[:status])
-    items = items.where(currency: params[:currency]) if ShopItem::CURRENCIES.include?(params[:currency])
-    items = items.where(featured: params[:featured] == "true") if params[:featured].in?(%w[true false])
-
-    items = items.left_joins(:shop_orders)
+      .left_joins(:shop_orders)
       .select("shop_items.*, COUNT(shop_orders.id) AS shop_orders_count")
       .group("shop_items.id")
       .order(featured: :desc, price: :asc)
 
     render inertia: "admin/shop_items/index", props: {
       shop_items: items.map { |item| serialize(item, orders_count: item.shop_orders_count) },
-      stats: stats,
-      filters: params.permit(:q, :status, :currency, :featured).to_h
+      stats: stats
     }
   end
 

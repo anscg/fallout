@@ -42,14 +42,18 @@ export default function ShopOrderNew({
   })
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [quantity, setQuantity] = useState(1)
-  const balance = shop_item.currency === 'gold' ? gold_balance : koi_balance
-  const currencyLabel = shop_item.currency === 'gold' ? 'gold' : 'koi'
-  const currencyIcon = shop_item.currency === 'gold' ? '/gold.webp' : '/koifish.webp'
-  const maxQuantity = shop_item.requires_date_selection
-    ? Math.min(Math.floor(balance / shop_item.price), SUMMIT_DATES.length)
-    : Math.floor(balance / shop_item.price)
+  const isGold = shop_item.currency === 'gold'
+  const currencyLabel = isGold ? 'gold' : 'koi'
+  const currencyIcon = isGold ? '/gold.webp' : '/koifish.webp'
+  // Koi items can be paid with koi and/or gold (1 koi = 1 gold); gold items are gold-only.
+  const availableBalance = isGold ? gold_balance : koi_balance + gold_balance
   const totalCost = shop_item.price * quantity
-  const remaining = balance - totalCost
+  // Spend available koi first, cover the remainder in gold — mirrors the server-side split.
+  const koiSpent = isGold ? 0 : Math.min(koi_balance, totalCost)
+  const goldSpent = totalCost - koiSpent
+  const maxQuantity = shop_item.requires_date_selection
+    ? Math.min(Math.floor(availableBalance / shop_item.price), SUMMIT_DATES.length)
+    : Math.floor(availableBalance / shop_item.price)
   const hasAddresses = hca_addresses.length > 0
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -205,21 +209,34 @@ export default function ShopOrderNew({
           </div>
           <div className="mb-6 text-dark-brown">
             <div className="flex justify-between">
-              <span>Balance</span>
-              <span className="font-bold">
-                {balance} {currencyLabel}
-              </span>
-            </div>
-            <div className="flex justify-between">
               <span>Cost{quantity > 1 ? ` (${quantity} × ${shop_item.price})` : ''}</span>
-              <span className="font-bold">
-                -{totalCost} {currencyLabel}
-              </span>
+              <span className="font-bold">{totalCost}</span>
             </div>
+            {isGold ? (
+              <div className="flex justify-between">
+                <span>Paid in gold</span>
+                <span className="font-bold">-{totalCost} gold</span>
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-between">
+                  <span>Paid in koi</span>
+                  <span className="font-bold">-{koiSpent} koi</span>
+                </div>
+                {goldSpent > 0 && (
+                  <div className="flex justify-between">
+                    <span>Paid in gold</span>
+                    <span className="font-bold">-{goldSpent} gold</span>
+                  </div>
+                )}
+              </>
+            )}
             <div className="flex justify-between border-t-2 border-dark-brown pt-1 mt-2 ">
               <span className="font-bold">After purchase</span>
               <span className="font-bold">
-                {remaining} {currencyLabel}
+                {isGold
+                  ? `${gold_balance - totalCost} gold`
+                  : `${koi_balance - koiSpent} koi · ${gold_balance - goldSpent} gold`}
               </span>
             </div>
           </div>

@@ -14,7 +14,7 @@ class LookoutSessionsController < ApplicationController
     token = session_data["token"]
     current_user.update!(pending_lookout_tokens: current_user.pending_lookout_tokens + [ token ])
 
-    redirect_to record_lookout_sessions_path(token: token)
+    redirect_to record_lookout_sessions_path(token: token, desktop: params[:desktop].presence)
   end
 
   def record
@@ -39,7 +39,19 @@ class LookoutSessionsController < ApplicationController
         status: session_data.dig("status") || "pending"
       },
       lookout_api_url: LookoutService.host,
-      return_to: params[:return_to]
+      return_to: params[:return_to],
+      desktop: params[:desktop] == "true"
     }
+  end
+
+  private
+
+  # Override the default (redirect to root): send guests through HCA login and back to this
+  # exact URL so deep links like /lookout_sessions/new?desktop=true survive the OAuth round trip.
+  def authenticate_user!
+    return if current_user
+
+    session[:return_to] = request.fullpath
+    redirect_to signin_path
   end
 end

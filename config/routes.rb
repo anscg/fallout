@@ -363,6 +363,15 @@ Rails.application.routes.draw do
           end
           collection { get :next }
         end
+        # Backfill queues: add missing internal justifications to already-approved DR/BR.
+        resources :design_review_backfills, only: [ :index, :show, :update ] do
+          member { post :heartbeat }
+          collection { get :next }
+        end
+        resources :build_review_backfills, only: [ :index, :show, :update ] do
+          member { post :heartbeat }
+          collection { get :next }
+        end
         get  "mine",          to: "my_reviews#show",  as: :mine
         get  "mine/:user_id", to: "my_reviews#show",  as: :user_reviews
       end
@@ -372,6 +381,12 @@ Rails.application.routes.draw do
       resources :projects, only: [ :index, :show ] do
         resources :reviewer_notes, only: [ :create, :update, :destroy ]
       end
+
+      # Ad-hoc project-wide time audits. Created from a project (admin-only) and opened by the
+      # random token in the URL, never by id — the share link is the credential, and access is
+      # still gated to admins/time auditors by ProjectTimeAuditPolicy.
+      resources :project_time_audits, only: [ :show, :update, :destroy ], path: "project_audits", param: :token
+      post "projects/:project_id/project_audits", to: "project_time_audits#create", as: :project_audits
       resources :users, only: [ :index, :show ]
 
       resources :ships, only: [ :index, :show ], path: "reviews"
@@ -422,11 +437,14 @@ Rails.application.routes.draw do
       resources :users, only: [] do
         member do
           patch :update_roles
+          post :impersonate # Admin-only: start an impersonation session as this user
           patch :update_streak_day # Admin streak day status override
           patch :restore_streak_goal # Admin streak goal restore (fills blank/missed days with frozen)
           patch :update_ban # Admin ban/unban — admin-only
           patch :update_ticket_hours_override # Admin per-user ticket hours threshold override
           patch :toggle_reviewer_suggestion # Exclude/include from "Not Yet a Reviewer" list
+          patch :toggle_dashboard_exclusion      # Admin-only: hide/show a reviewer in the Total Contributed leaderboard
+          patch :toggle_reduced_expectations    # Admin-only: flag a reviewer as having reduced expectations this period
         end
       end
       resources :activity_checks, only: [ :new, :create ]
@@ -434,7 +452,9 @@ Rails.application.routes.draw do
         collection { post :refresh }
       end
       resources :shop_items, only: [ :index, :new, :create, :edit, :update, :destroy ] # Admin shop item management
-      resources :shop_orders, only: [ :index, :show, :update ] # Admin order management
+      resources :shop_orders, only: [ :index, :show, :update ] do # Admin order management
+        patch :bulk_update, on: :collection # Apply one state to many orders at once
+      end
       resources :ticket_claims, only: [ :index ] do # Admin event ticket claim review
         member do
           patch :approve
@@ -445,12 +465,27 @@ Rails.application.routes.draw do
           patch :bulk_reject
         end
       end
-      resources :koi_transactions, only: [ :index, :new, :create ] # Admin koi adjustments
+      # Debt console — users holding an approved ticket but still under their approved-hours bar.
+      get    "debt"               => "debt#index",           as: :debt
+      post   "debt/check_ins"     => "debt#create_check_in",  as: :debt_check_ins
+      delete "debt/check_ins/:id" => "debt#destroy_check_in", as: :debt_check_in
+      post   "debt/hidden/:user_id"   => "debt#hide",   as: :debt_hide
+      delete "debt/hidden/:user_id"   => "debt#unhide", as: :debt_unhide
+      resources :koi_transactions, only: [ :index, :new, :create ] do # Admin koi adjustments
+        get :users_search, on: :collection # Autocomplete for the adjustment user picker
+      end
       resources :you_tube_videos, only: [] do
         member do
           post :refetch # Re-fetch YouTube metadata for videos with missing duration
         end
       end
+
+      # Unlisted admin tooling: process YouTube footage into 60× timelapses for time auditing.
+      # Inside AdminConstraint (admin-only) + controller require_admin!. Not in AdminSidebar.
+      get  "youtube-timeaudit"             => "youtube_timeaudits#index",         as: :youtube_timeaudits
+      get  "youtube-timeaudit/status"      => "youtube_timeaudits#status",        as: :youtube_timeaudits_status
+      post "youtube-timeaudit/process_all" => "youtube_timeaudits#process_all",   as: :process_all_youtube_timeaudits
+      post "youtube-timeaudit/:id/process" => "youtube_timeaudits#process_video", as: :process_youtube_timeaudit
       resources :soup_campaigns, only: [ :index, :show, :new, :create, :update, :edit, :destroy ] do
         member do
           get :audience_preview
@@ -475,9 +510,22 @@ Rails.application.routes.draw do
         resources :adjustments, only: [ :new, :create ] do # Manual ledger in/out adjustments (hcb role only)
           collection { get :ledger } # JSON sidecar for live "current → projected" preview on the form
         end
+        # Users owed funding with no order to deliver it (hcb role only). Member :id is a
+        # USER id — the report has no record of its own, each row is a user's delta.
+        resources :unissued_funds, only: [ :index ] do
+          member do
+            post :refund_to_currency # Ledger-only: cancels the entitlement, credits koi/gold
+            post :issue_funds # Enqueues the settle service — moves real money onto the card
+          end
+        end
       end
     end
   end
+
+  # Exit an impersonation session. Intentionally OUTSIDE the admin constraint — while
+  # impersonating, the effective user is the (non-staff) target, so they'd fail the
+  # AdminConstraint. The controller restores the original admin session.
+  delete "impersonate", to: "impersonations#destroy", as: :stop_impersonating
 
   # Read-only inspector linked from YSWS Unified DB rows so external 3rd-party
   # auditors can see the review timeline + reviewer attribution behind a ship's
@@ -565,6 +613,7 @@ Rails.application.routes.draw do
         get :preflight # Legacy route — redirects to /projects/:id/ship
         post "preflight/run", action: :run # Frontend kicks off preflight scan
         get "preflight/status", action: :status # Polled by frontend for real-time check updates
+        post :reship # Pull the in-review ship out of the queue and submit a fresh one (no preflight)
       end
     end
   end
@@ -578,6 +627,9 @@ Rails.application.routes.draw do
 
   # Universal invite link from emails — works for any auth state
   get "i/:token" => "pending_collaboration_invites#show", as: :pending_invite
+
+  # Public certificate-verification link printed on 60h certificates — works for any auth state
+  get "verify/:token" => "certificate_verifications#show", as: :verify_certificate
 
   # Top-level journal entry point — redirects to project-scoped route or shows project selection
   get "journal_entries/new" => "journal_entries#new", as: :new_journal_entry
@@ -609,6 +661,8 @@ Rails.application.routes.draw do
   %w[infill rmrrf infill-2026 rmrrf-2026].each do |slug|
     get slug => "tracking_redirects#show", defaults: { slug: slug }
   end
+
+  get "guide" => redirect("/docs/guide") # Participant's guide
 
   get "faq" => redirect("/docs/faq") # Shortcut to FAQ docs page
   get "unsubscribe/soup/:token" => "soup_campaign_unsubscribes#show", as: :soup_campaign_unsubscribe

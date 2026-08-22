@@ -3,15 +3,12 @@ class Admin::ProjectFlagsController < Admin::ApplicationController
   skip_before_action :require_admin!, only: [ :create ] # Reviewers can flag projects from the review UI
 
   def index
-    flags = policy_scope(ProjectFlag)
-      .includes(:user, project: :user)
-      .order(created_at: :desc)
-    @pagy, @flags = pagy(flags)
-
-    render inertia: {
-      flags: @flags.map { |f| serialize_flag(f) },
-      pagy: pagy_props(@pagy)
-    }
+    # policy_scope runs on the critical path so verify_policy_scoped passes on the initial
+    # (deferred) render; it's lazy, so no query fires until the deferred loader enumerates it.
+    scope = policy_scope(ProjectFlag)
+    # The heavy query + serialization is deferred so the page shell appears immediately
+    # and the table shows a skeleton until data lands.
+    render inertia: deferred_index_props(scope)
   end
 
   def destroy
@@ -35,6 +32,23 @@ class Admin::ProjectFlagsController < Admin::ApplicationController
   end
 
   private
+
+  # Memoized loader shared by the deferred index props so the heavy query runs once per
+  # deferred request even though flags/pagy are separate Inertia props.
+  def deferred_index_props(scope)
+    memo = nil
+    load = lambda do
+      memo ||= begin
+        flags = scope.includes(:user, project: :user).order(created_at: :desc)
+        @pagy, @flags = pagy(flags)
+        { flags: @flags.map { |f| serialize_flag(f) }, pagy: pagy_props(@pagy) }
+      end
+    end
+    {
+      flags: InertiaRails.defer(group: "index") { load.call[:flags] },
+      pagy: InertiaRails.defer(group: "index") { load.call[:pagy] }
+    }
+  end
 
   def flag_params
     params.require(:project_flag).permit(:project_id, :ship_id, :review_stage, :reason)

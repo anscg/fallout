@@ -39,6 +39,9 @@ class SoupCampaign < ApplicationRecord
     U07ACECRYM6 U080A3QP42C U03UBRVG2MS U07DJMFAQQP U09UE480JHH
   ].freeze
 
+  # Skip yjs_state — large binary collab-editing blob with no audit value.
+  has_paper_trail skip: %i[yjs_state]
+
   belongs_to :created_by, class_name: "User"
   has_many :soup_campaign_recipients, dependent: :destroy
 
@@ -173,17 +176,33 @@ class SoupCampaign < ApplicationRecord
     return [] unless targeting_supported?
     return [] if query.blank?
 
-    scope = User.verified.kept
-    filters = query.lines.map(&:strip).reject(&:blank?)
+    base = User.verified.kept
+    mode, filters = extract_match_mode(query.lines.map(&:strip).reject(&:blank?))
+    return [] if filters.empty?
 
-    filters.each do |filter|
-      scope = apply_target_filter(scope, filter)
+    if mode == :any
+      # OR: union each filter's matches, computed independently against the full base scope.
+      filters.flat_map { |filter| apply_target_filter(base, filter).distinct.pluck(:id) }.uniq
+    else
+      # AND: chain filters so each narrows the previous scope.
+      filters.reduce(base) { |scope, filter| apply_target_filter(scope, filter) }.distinct.pluck(:id)
     end
-
-    scope.distinct.pluck(:id)
   rescue ArgumentError => e
     errors.add(:target_user_ids_text, e.message)
     []
+  end
+
+  # Pulls an optional `match: all|any` directive out of the filter lines. Defaults to :all
+  # (every filter must match); :any unions the filters so a user matching any one is included.
+  def extract_match_mode(lines)
+    mode = :all
+    filters = lines.reject do |line|
+      next false unless (m = line.match(/\Amatch:\s*(all|any)\z/i))
+
+      mode = m[1].downcase.to_sym
+      true
+    end
+    [ mode, filters ]
   end
 
   def apply_target_filter(scope, filter)
@@ -197,25 +216,157 @@ class SoupCampaign < ApplicationRecord
       Regexp.last_match(1).downcase == "true" ? scope.joins(projects: :ships) : scope.where.not(id: User.joins(projects: :ships).select(:id))
     when /\Aqualified:\s*(true|false)\z/i
       filter_by_ticket_qualification(scope, Regexp.last_match(1).downcase == "true")
-    when /\Atotal_time_logged_seconds\s*(>=|<=|=|>|<)\s*(\d+)\z/i
-      operator = Regexp.last_match(1)
-      threshold = Regexp.last_match(2).to_i
-      filter_by_total_time(scope, operator, threshold)
+    when /\Ahas_ticket:\s*(true|false)\z/i
+      filter_by_ticket_presence(scope, Regexp.last_match(1).downcase == "true")
+    when /\Atotal_time_(logged|submitted|approved)_seconds\s*(>=|<=|=|>|<)\s*(\d+|[a-z_]+)\z/i
+      metric    = Regexp.last_match(1).downcase
+      operator  = Regexp.last_match(2)
+      raw       = Regexp.last_match(3)
+      threshold = raw.match?(/\A\d+\z/) ? raw.to_i : raw.to_sym
+      filter_by_total_time(scope, operator, threshold, metric: metric.to_sym)
+    when /\Akoi\s*(>=|<=|=|>|<)\s*(\d+)\z/i
+      filter_by_currency(scope, :koi, Regexp.last_match(1), Regexp.last_match(2).to_i)
+    when /\Agold\s*(>=|<=|=|>|<)\s*(\d+)\z/i
+      filter_by_currency(scope, :gold, Regexp.last_match(1), Regexp.last_match(2).to_i)
     else
       raise ArgumentError, "unsupported audience filter: #{filter}"
     end
   end
 
-  def filter_by_total_time(scope, operator, threshold)
+  # metric selects which seconds to compare: :logged (all journal time), :submitted (time on
+  # shipped journal entries) or :approved (TA-approved seconds only).
+  # manual_seconds are always included for :logged/:submitted — they're admin-set hours that
+  # can't be tied to a ship but count toward a user's total regardless of mode.
+  # threshold can be an Integer (fixed seconds) or a Symbol variable (e.g. :ticket_hours —
+  # resolved per-user so each user is compared against their own value).
+  def filter_by_total_time(scope, operator, threshold, metric: :logged)
     user_ids = scope.pluck(:id)
     return scope.none if user_ids.empty?
 
-    seconds_by_user = compute_batch_user_seconds(user_ids)
-    matching_ids = seconds_by_user.select { |_, secs| secs.public_send(operator, threshold) }.keys
+    seconds_by_user = if metric == :approved
+      batch_approved_seconds(user_ids)
+    else
+      compute_batch_user_seconds(user_ids, shipped_only: metric == :submitted)
+    end
+    threshold_by_user = threshold.is_a?(Symbol) ? resolve_variable(user_ids, threshold) : nil
+
+    # Iterate the full id list (not just hash keys) so users with zero attributed seconds
+    # still match <, <= and = 0 — they're absent from the totals hash otherwise.
+    matching_ids = user_ids.select do |uid|
+      limit = threshold_by_user ? threshold_by_user[uid].to_i : threshold
+      seconds_by_user[uid].to_i.public_send(operator, limit)
+    end
     scope.where(id: matching_ids)
   end
 
-  def compute_batch_user_seconds(user_ids)
+  # Variables that can appear as the RHS of a time filter (e.g. `logged_seconds > ticket_hours`).
+  # Each maps to a private method that returns { user_id => seconds }.
+  VARIABLES = {
+    ticket_hours:   :variable_ticket_hours,
+    approved_hours: :variable_approved_hours
+  }.freeze
+
+  def resolve_variable(user_ids, variable)
+    method_name = VARIABLES[variable] or raise ArgumentError, "unknown variable: #{variable}"
+    send(method_name, user_ids)
+  end
+
+  def variable_ticket_hours(user_ids)
+    User.where(id: user_ids).pluck(:id, :ticket_hours_override)
+        .to_h { |id, override| [ id, (override || 60) * 3600 ] }
+  end
+
+  def variable_approved_hours(user_ids)
+    batch_approved_seconds(user_ids)
+  end
+
+  # Batch-computes TA-approved seconds per user, mirroring User#approved_time_logged_seconds
+  # but across an arbitrary set of user IDs in a single pass.
+  def batch_approved_seconds(user_ids)
+    user_set = user_ids.to_set
+    totals   = Hash.new(0)
+
+    owned_pids       = Project.kept.where(user_id: user_ids).pluck(:id)
+    collab_pids      = Collaborator.kept
+      .where(user_id: user_ids, collaboratable_type: "Project")
+      .joins("INNER JOIN projects ON projects.id = collaborators.collaboratable_id AND projects.discarded_at IS NULL")
+      .pluck(:collaboratable_id)
+    je_author_pids   = JournalEntry.kept.where(user_id: user_ids).distinct.pluck(:project_id)
+    je_collab_je_ids = Collaborator.kept
+      .where(user_id: user_ids, collaboratable_type: "JournalEntry").pluck(:collaboratable_id)
+    je_collab_pids   = je_collab_je_ids.any? ?
+      JournalEntry.kept.where(id: je_collab_je_ids).distinct.pluck(:project_id) : []
+
+    all_pids = (owned_pids + collab_pids + je_author_pids + je_collab_pids).uniq
+    return totals if all_pids.empty?
+
+    approved_by_project = Ship.approved
+      .joins(:project)
+      .where(projects: { id: all_pids, discarded_at: nil })
+      .group("projects.id")
+      .sum(:approved_public_seconds)
+    return totals if approved_by_project.empty?
+
+    project_by_je = JournalEntry.kept
+      .joins(:ship)
+      .where(project_id: approved_by_project.keys, ships: { status: Ship.statuses[:approved] })
+      .pluck(:id, :project_id).to_h
+    return totals if project_by_je.empty?
+
+    all_je_ids       = project_by_je.keys
+    je_seconds       = JournalEntry.batch_time_logged(all_je_ids)
+    je_attributions  = JournalEntry.batch_attributed_user_ids(all_je_ids)
+    je_authors       = JournalEntry.where(id: all_je_ids).pluck(:id, :user_id).to_h
+
+    total_by_project = Hash.new(0)
+    user_by_project  = Hash.new { |h, k| h[k] = Hash.new(0) }
+
+    je_seconds.each do |je_id, total_secs|
+      pid = project_by_je[je_id]
+      total_by_project[pid] += total_secs
+      author_id = je_authors[je_id]
+      next unless author_id
+      attr_set = ([ author_id ] | (je_attributions[je_id] || [])).uniq
+      next if attr_set.empty?
+      share = total_secs.to_f / attr_set.size
+      attr_set.each { |uid| user_by_project[pid][uid] += share if user_set.include?(uid) }
+    end
+
+    approved_by_project.each do |pid, approved|
+      total = total_by_project[pid].to_f
+      next unless total.positive?
+      user_by_project[pid].each { |uid, user_secs| totals[uid] += (approved * user_secs / total).round }
+    end
+
+    totals
+  end
+
+  def filter_by_currency(scope, currency, operator, threshold)
+    user_ids = scope.pluck(:id)
+    return scope.none if user_ids.empty?
+
+    balances    = batch_currency_balances(user_ids, currency)
+    matching_ids = user_ids.select { |uid| balances[uid].to_i.public_send(operator, threshold) }
+    scope.where(id: matching_ids)
+  end
+
+  def batch_currency_balances(user_ids, currency)
+    case currency
+    when :koi
+      earned       = KoiTransaction.where(user_id: user_ids).group(:user_id).sum(:amount)
+      spent_shop   = ShopOrder.where(user_id: user_ids).where.not(state: :rejected).group(:user_id).sum(:frozen_koi_amount)
+      spent_grants = ProjectGrantOrder.kept.where(user_id: user_ids).where.not(state: :rejected).group(:user_id).sum(:frozen_koi_amount)
+    when :gold
+      earned       = GoldTransaction.where(user_id: user_ids).group(:user_id).sum(:amount)
+      spent_shop   = ShopOrder.where(user_id: user_ids).where.not(state: :rejected).group(:user_id).sum(:frozen_gold_amount)
+      spent_grants = ProjectGrantOrder.kept.where(user_id: user_ids).where.not(state: :rejected).group(:user_id).sum(:frozen_gold_amount)
+    end
+    user_ids.each_with_object(Hash.new(0)) do |uid, h|
+      h[uid] = earned[uid].to_i - spent_shop[uid].to_i - spent_grants[uid].to_i
+    end
+  end
+
+  def compute_batch_user_seconds(user_ids, shipped_only: false)
     user_set = user_ids.to_set
     totals = Hash.new(0)
 
@@ -241,22 +392,26 @@ class SoupCampaign < ApplicationRecord
     all_project_ids = (owned_pids + collab_pids + je_author_pids + je_collab_pids).uniq
     return totals if all_project_ids.empty?
 
-    all_je_ids = JournalEntry.kept.where(project_id: all_project_ids).pluck(:id)
-    return totals if all_je_ids.empty?
+    je_scope = JournalEntry.kept.where(project_id: all_project_ids)
+    je_scope = je_scope.where.not(ship_id: nil) if shipped_only # submitted == attached to a ship
+    all_je_ids = je_scope.pluck(:id)
 
-    je_seconds = JournalEntry.batch_time_logged(all_je_ids)
-    je_attributions = JournalEntry.batch_attributed_user_ids(all_je_ids)
-    je_authors = JournalEntry.where(id: all_je_ids).pluck(:id, :user_id).to_h
+    unless all_je_ids.empty?
+      je_seconds = JournalEntry.batch_time_logged(all_je_ids)
+      je_attributions = JournalEntry.batch_attributed_user_ids(all_je_ids)
+      je_authors = JournalEntry.where(id: all_je_ids).pluck(:id, :user_id).to_h
 
-    je_seconds.each do |je_id, total_secs|
-      author_id = je_authors[je_id]
-      next unless author_id
-      attr_set = ([ author_id ] | (je_attributions[je_id] || [])).uniq
-      next if attr_set.empty?
-      share = total_secs / attr_set.size
-      attr_set.each { |uid| totals[uid] += share if user_set.include?(uid) }
+      je_seconds.each do |je_id, total_secs|
+        author_id = je_authors[je_id]
+        next unless author_id
+        attr_set = ([ author_id ] | (je_attributions[je_id] || [])).uniq
+        next if attr_set.empty?
+        share = total_secs / attr_set.size
+        attr_set.each { |uid| totals[uid] += share if user_set.include?(uid) }
+      end
     end
 
+    # manual_seconds is project-level and can't be attached to a ship, but always counts.
     project_members = Hash.new { |h, k| h[k] = [] }
     Project.kept.where(id: all_project_ids, user_id: user_ids)
       .pluck(:id, :user_id).each { |pid, uid| project_members[pid] << uid }
@@ -280,6 +435,12 @@ class SoupCampaign < ApplicationRecord
     approved_claims = User.joins(:ticket_claim).merge(TicketClaim.approved).select(:id)
 
     qualified ? scope.where(id: approved_claims) : scope.where.not(id: approved_claims)
+  end
+
+  def filter_by_ticket_presence(scope, has_ticket)
+    with_claims = User.joins(:ticket_claim).select(:id)
+
+    has_ticket ? scope.where(id: with_claims) : scope.where.not(id: with_claims)
   end
 
   def generate_unsubscribe_token

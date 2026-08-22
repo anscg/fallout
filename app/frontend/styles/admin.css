@@ -167,53 +167,10 @@
   color: oklch(0.9 0 0);
 }
 
-/* ---------- Page slide transition (JS-driven horizontal slide on route change) ---------- */
-
-/* --admin-slide-dur kept in sync with SLIDE_DUR constant in AdminLayout.tsx */
-.admin {
-  --admin-slide-dur: 280ms;
-  --admin-slide-ease: cubic-bezier(0.165, 0.84, 0.44, 1);
-}
-
-.admin .t-admin-page {
-  will-change: transform, opacity;
-  /* Clip overflow during slide so content doesn't spill outside the scroll area */
-  overflow-x: clip;
-}
-
-/* Ghost overlay — snapshot of the exiting page, appended to <body> by AdminLayout */
-.admin-page-ghost {
-  background: var(--background, #fff);
-  /* Match the main padding so it looks identical to the live page */
-  overflow: hidden;
-}
-
-/* ---------- Skeleton shimmer — applied to .t-admin-page while Inertia is loading ---------- */
-
-@keyframes admin-skeleton-sweep {
-  0%   { background-position: -200% center; }
-  100% { background-position:  200% center; }
-}
-
-.admin .t-admin-page.is-loading::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 10;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--muted, oklch(0.97 0 0)) 50%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  animation: admin-skeleton-sweep 800ms var(--admin-slide-ease) infinite;
-  opacity: 0.6;
-}
-
 .admin .t-admin-page {
   position: relative;
+  /* Clip horizontal overflow so wide tables don't spill outside the scroll area */
+  overflow-x: clip;
 }
 
 /* ---------- Card hover lift — gentle interactive cue for clickable cards ---------- */
@@ -351,8 +308,5 @@
   .admin .t-nav-item::before,
   .admin .t-admin-page {
     transition: none !important;
-  }
-  .admin-page-ghost {
-    display: none !important;
   }
 }

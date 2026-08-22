@@ -1,29 +1,15 @@
 class Admin::Reviews::DesignReviewsController < Admin::Reviews::BaseController
   def index
-    base = policy_scope(DesignReview)
-      .includes(ship: [ :project, :time_audit_review, project: :user, requirements_check_review: :reviewer ], reviewer: [])
-
+    # parse_sort persists the sort preference in session — keep it on the critical path so the
+    # eager current_sort prop is correct. The heavy queue lists are deferred behind a skeleton.
     sort = parse_sort
-    # Order by ship.created_at so the longest-waiting ship floats to the top —
-    # the DR row is created later (after TA approval), so DR.created_at doesn't
-    # reflect how long the student has actually been waiting.
-    pending_reviews = base.pending.where.not(ship_id: flagged_ship_ids).joins(:ship).order("ships.created_at ASC").load
-    @pagy, @all_reviews = pagy(base.order(created_at: :desc))
-    flagged_ids = ProjectFlag.distinct.pluck(:project_id).to_set
-    Ship.preload_cycle_started_at((pending_reviews + @all_reviews).map(&:ship)) # avoid N+1 in serialize_review_row (dedup done inside)
-    page_project_ids = (pending_reviews + @all_reviews).map { |r| r.ship.project_id }.uniq
-    previously_reviewed = precompute_previously_reviewed_project_ids(page_project_ids)
-    lifetime_hours = precompute_user_lifetime_hours(pending_reviews)
-    priority_ids = ReviewPriorityCalculator.priority_ship_ids(pending_reviews.map(&:ship))
-    pending_reviews = sort_pending(pending_reviews, sort, lifetime_hours, priority_ids)
-
+    ticket_eligible = parse_ticket_filter
     render inertia: {
-      pending_reviews: pending_reviews.map { |r| serialize_review_row(r, previously_reviewed_project_ids: previously_reviewed, user_lifetime_hours: lifetime_hours, priority_ship_ids: priority_ids) },
-      all_reviews: @all_reviews.map { |r| serialize_review_row(r, flagged_project_ids: flagged_ids, previously_reviewed_project_ids: previously_reviewed) },
-      pagy: pagy_props(@pagy),
       start_reviewing_path: next_admin_reviews_design_reviews_path,
       current_sort: sort,
-      **review_stats_props(DesignReview)
+      ticket_eligible: ticket_eligible,
+      **review_stats_props(DesignReview),
+      **deferred_index_props(sort, ticket_eligible)
     }
   end
 
@@ -45,8 +31,8 @@ class Admin::Reviews::DesignReviewsController < Admin::Reviews::BaseController
     render inertia: {
       review: serialize_review_detail(@review),
       project: serialize_project_context(project, ship),
-      new_entries: new_entries.map { |je| serialize_journal_entry(je, time_audit) },
-      previous_entries: previous_entries.map { |je| serialize_journal_entry(je, time_audit) },
+      new_entries: new_entries.map { |je| serialize_journal_entry(je, time_audit, ship) },
+      previous_entries: previous_entries.map { |je| serialize_journal_entry(je, time_audit, ship) },
       sibling_statuses: serialize_sibling_statuses(ship),
       previous_reviews: serialize_previous_reviews(project, ship, RequirementsCheckReview, DesignReview, BuildReview),
       repo_tree: ship.requirements_check_review&.repo_tree,
@@ -121,6 +107,41 @@ class Admin::Reviews::DesignReviewsController < Admin::Reviews::BaseController
   end
 
   private
+
+  # Memoized loader shared by the deferred index props so the heavy queue query runs once per
+  # deferred request even though pending_reviews/all_reviews/pagy are separate Inertia props.
+  def deferred_index_props(sort, ticket_eligible)
+    memo = nil
+    load = lambda do
+      memo ||= begin
+        base = policy_scope(DesignReview)
+          .includes(ship: [ :project, :time_audit_review, project: :user, requirements_check_review: :reviewer ], reviewer: [])
+
+        # Order by ship.created_at so the longest-waiting ship floats to the top —
+        # the DR row is created later (after TA approval), so DR.created_at doesn't
+        # reflect how long the student has actually been waiting.
+        pending_reviews = base.pending.where.not(ship_id: flagged_ship_ids).joins(:ship).order("ships.created_at ASC").load
+        pending_reviews = filter_ticket_eligible(pending_reviews) if ticket_eligible
+        @pagy, @all_reviews = pagy(base.order(created_at: :desc))
+        flagged_ids = ProjectFlag.distinct.pluck(:project_id).to_set
+        Ship.preload_cycle_started_at((pending_reviews + @all_reviews).map(&:ship)) # avoid N+1 in serialize_review_row (dedup done inside)
+        page_project_ids = (pending_reviews + @all_reviews).map { |r| r.ship.project_id }.uniq
+        previously_reviewed = precompute_previously_reviewed_project_ids(page_project_ids)
+        lifetime_hours = precompute_user_lifetime_hours(pending_reviews)
+        pending_reviews = sort_pending(pending_reviews, sort, lifetime_hours)
+        {
+          pending_reviews: pending_reviews.map { |r| serialize_review_row(r, previously_reviewed_project_ids: previously_reviewed, user_lifetime_hours: lifetime_hours) },
+          all_reviews: @all_reviews.map { |r| serialize_review_row(r, flagged_project_ids: flagged_ids, previously_reviewed_project_ids: previously_reviewed) },
+          pagy: pagy_props(@pagy)
+        }
+      end
+    end
+    {
+      pending_reviews: InertiaRails.defer(group: "index") { load.call[:pending_reviews] },
+      all_reviews: InertiaRails.defer(group: "index") { load.call[:all_reviews] },
+      pagy: InertiaRails.defer(group: "index") { load.call[:pagy] }
+    }
+  end
 
   def review_model
     DesignReview

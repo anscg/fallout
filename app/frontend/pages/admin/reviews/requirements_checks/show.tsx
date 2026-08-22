@@ -109,11 +109,7 @@ function SiblingBadge({ label, review }: { label: string; review: SiblingReview 
 
 // --- Collapsible Card ---
 
-const JournalEntriesList = memo(function JournalEntriesList({
-  entries,
-}: {
-  entries: (RequirementsCheckJournalEntry & { isNew: boolean })[]
-}) {
+const JournalEntriesList = memo(function JournalEntriesList({ entries }: { entries: RequirementsCheckJournalEntry[] }) {
   return (
     <div className="divide-y divide-border overflow-y-auto max-h-96">
       {entries.map((entry) => (
@@ -127,9 +123,12 @@ const JournalEntriesList = memo(function JournalEntriesList({
               <ClockIcon className="size-3" />
               {formatDuration(entry.total_duration)}
             </span>
-            {!entry.isNew && (
-              <Badge variant="outline" className="text-[10px]">
-                Older Ship
+            {!entry.in_ship && (
+              <Badge
+                variant="outline"
+                className="text-[10px] bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-950 dark:text-orange-300 dark:border-orange-800"
+              >
+                Not part of this ship
               </Badge>
             )}
           </div>
@@ -668,13 +667,7 @@ export default function RequirementsChecksShow({
     return results
   }, [review.preflight_results])
 
-  const allEntries = useMemo(
-    () => [
-      ...new_entries.map((e) => ({ ...e, isNew: true })),
-      ...previous_entries.map((e) => ({ ...e, isNew: false })),
-    ],
-    [new_entries, previous_entries],
-  )
+  const allEntries = useMemo(() => [...new_entries, ...previous_entries], [new_entries, previous_entries])
 
   const handleSkip = useCallback(() => {
     const skipIds = skip ? skip.split(',') : []
@@ -978,6 +971,7 @@ export default function RequirementsChecksShow({
                     <HoursDisplay
                       publicHours={project.approved_public_hours}
                       internalHours={project.approved_internal_hours}
+                      loggedHours={project.ship_logged_hours}
                     />
                   </p>
                 </div>

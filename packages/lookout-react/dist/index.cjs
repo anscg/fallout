@@ -160,7 +160,7 @@ function resolveConfig(config) {
     autoStart: config.autoStart ?? false
   };
 }
-var SDK_VERSION = "0.2.7" ;
+var SDK_VERSION = "0.3.3" ;
 var LookoutContext = react.createContext(null);
 function useLookoutContext() {
   const ctx = react.useContext(LookoutContext);
@@ -2218,7 +2218,8 @@ function Gallery({
   onArchive,
   onRefresh,
   onAdd,
-  onSettings
+  onSettings,
+  banner
 }) {
   const scrollRef = react.useRef(null);
   const [showTopMask, setShowTopMask] = react.useState(false);
@@ -2247,6 +2248,7 @@ function Gallery({
   if (error && sessions.length === 0) {
     return /* @__PURE__ */ jsxRuntime.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100%" }, children: [
       /* @__PURE__ */ jsxRuntime.jsx(GalleryHeader, { onAdd, onSettings }),
+      banner && /* @__PURE__ */ jsxRuntime.jsx("div", { style: { padding: spacing.lg, paddingBottom: 0 }, children: banner }),
       /* @__PURE__ */ jsxRuntime.jsxs("div", { style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }, children: [
         /* @__PURE__ */ jsxRuntime.jsx(ErrorDisplay, { error, variant: "inline" }),
         onRefresh && /* @__PURE__ */ jsxRuntime.jsx(Button, { variant: "primary", size: "md", onClick: onRefresh, style: { marginTop: spacing.md }, children: "Retry" })
@@ -2256,6 +2258,7 @@ function Gallery({
   if (sessions.length === 0) {
     return /* @__PURE__ */ jsxRuntime.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100%" }, children: [
       /* @__PURE__ */ jsxRuntime.jsx(GalleryHeader, { onAdd, onSettings }),
+      banner && /* @__PURE__ */ jsxRuntime.jsx("div", { style: { padding: spacing.lg, paddingBottom: 0 }, children: banner }),
       /* @__PURE__ */ jsxRuntime.jsxs("div", { style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: spacing.xxl }, children: [
         /* @__PURE__ */ jsxRuntime.jsx("p", { style: { marginBottom: spacing.md }, children: /* @__PURE__ */ jsxRuntime.jsxs("svg", { width: "48", height: "48", viewBox: "0 0 24 24", fill: "none", stroke: colors.text.primary, strokeWidth: "1.5", style: { opacity: 0.2 }, children: [
           /* @__PURE__ */ jsxRuntime.jsx("rect", { x: "2", y: "3", width: "20", height: "14", rx: "2", ry: "2" }),
@@ -2269,6 +2272,7 @@ function Gallery({
   }
   return /* @__PURE__ */ jsxRuntime.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100%" }, children: [
     /* @__PURE__ */ jsxRuntime.jsx(GalleryHeader, { onAdd, onSettings }),
+    banner && /* @__PURE__ */ jsxRuntime.jsx("div", { style: { padding: spacing.lg, paddingBottom: 0 }, children: banner }),
     /* @__PURE__ */ jsxRuntime.jsx(
       "div",
       {
@@ -2662,18 +2666,27 @@ function useGallery({ apiBaseUrl, tokens }) {
     if (!hasAllInCache) {
       setLoading(true);
     }
-    fetch(`${apiBaseUrl}/api/sessions/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tokens: validTokens })
-    }).then(async (res) => {
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} ${res.statusText}
+    const BATCH_SIZE = 100;
+    const chunks = [];
+    for (let i = 0; i < validTokens.length; i += BATCH_SIZE) {
+      chunks.push(validTokens.slice(i, i + BATCH_SIZE));
+    }
+    Promise.all(
+      chunks.map(
+        (chunk) => fetch(`${apiBaseUrl}/api/sessions/batch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tokens: chunk })
+        }).then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`HTTP ${res.status} ${res.statusText}
 ${text.slice(0, 500)}`);
-      }
-      return res.json();
-    }).then((data) => {
+          }
+          return res.json();
+        })
+      )
+    ).then((results) => ({ sessions: results.flatMap((r) => r.sessions ?? []) })).then((data) => {
       if (!cancelled) {
         const now = Date.now();
         const THUMBNAIL_EXPIRY = 45 * 60 * 1e3;

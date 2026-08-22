@@ -17,6 +17,7 @@
 #
 #  index_gold_transactions_on_actor_id                         (actor_id)
 #  index_gold_transactions_on_built_irl_conversion_uniqueness  (ship_id,user_id) UNIQUE WHERE (((reason)::text = 'built_irl_conversion'::text) AND (ship_id IS NOT NULL))
+#  index_gold_transactions_on_created_at                       (created_at)
 #  index_gold_transactions_on_ship_id                          (ship_id)
 #  index_gold_transactions_on_ship_review_uniqueness           (ship_id,user_id) UNIQUE WHERE (((reason)::text = 'ship_review'::text) AND (ship_id IS NOT NULL))
 #  index_gold_transactions_on_transfer_id                      (transfer_id) WHERE (transfer_id IS NOT NULL)

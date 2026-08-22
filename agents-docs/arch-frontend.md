@@ -50,7 +50,10 @@ React 19 + TypeScript rendered via Inertia Rails. No client-side router — Rail
 
 ### AdminLayout — `app/frontend/layouts/AdminLayout.tsx`
 - shadcn/ui-based chrome for the `/admin` dashboard; pages set it via their own `layout` export
-- Dark-mode aware (`useAdminDark` hook)
+- Dark-mode aware (`useAdminDark` hook) — the light/`.dark` theme variables are scoped to the `.admin` wrapper div (`admin.css`), so the `dark` class is toggled on that div, not `<html>`. **Gotcha**: Radix overlays (popover/select/dropdown/tooltip/sheet/alert-dialog) portal to `document.body` by default, which is OUTSIDE `.admin`, so they'd render with no theme (always light). The admin `ui/*` primitives pass `container={adminPortalContainer()}` (`lib/adminPortal.ts`, resolves the `.admin` element) to their `Portal` so overlays stay inside the themed subtree. Any new portaled admin overlay must do the same.
+- No page-transition animation — navigation swaps instantly. Snappiness comes from two things instead:
+  - **Hover prefetch**: sidebar nav links (`AdminSidebar`) and in-table detail `<Link>`s use `prefetch cacheFor="30s"`, so hovering warms the response and the click is instant.
+  - **Defer + skeleton**: admin list controllers (`projects`, `users`, `ships`, `shop_orders`, `koi_transactions`, `project_flags`, the four `reviews/*` queues) keep cheap chrome props inline and wrap the heavy query/serialization in a memoized `deferred_index_props(scope)` loader exposing `records`/`pagy`/`total_count` via `InertiaRails.defer(group: "index")`. **Gotcha**: `policy_scope`/`authorize` must run on the action's critical path (not inside the deferred block) or `verify_policy_scoped`/`verify_authorized` fails on the initial render — `policy_scope` is lazy so calling it there fires no query. Pages render `<Deferred data={[...]} fallback={<DataTableSkeleton columns={n} />}>` (`components/admin/DataTableSkeleton.tsx`) and mark deferred props optional. The deferred follow-up request re-runs the whole action, so index `before_action`s must be idempotent.
 
 ### ReviewLayout — `app/frontend/layouts/ReviewLayout.tsx`
 - Layout for the admin review queues (time audits, requirements checks, design/build reviews)
@@ -235,7 +238,7 @@ Note: two `Pagination.tsx` files exist (`components/Pagination.tsx` and `compone
 - `use-mobile.ts` — mobile breakpoint detection (admin/shadcn)
 - `useAdminDark.ts` — admin dark-mode state
 - `useReviewHeartbeat.ts` — keeps a review claim alive while reviewing
-- `useReviewShortcuts.ts` — keyboard shortcuts for review queues
+- `useReviewShortcuts.ts` — keyboard shortcuts for review queues (used by the RC, DR, and BR show pages, which share the same bindings; `ShortcutHelpDialog` renders the `?` cheatsheet)
 
 Some hook-like helpers also live under `app/frontend/lib/` (e.g. `useColorLerp.ts`, `useLiveReload.ts`, `useNowTick.ts`).
 

@@ -18,14 +18,18 @@ module ReviewRepoDiffService
     compute(review.ship, anchor_review_for(review))
   end
 
-  # Most recent terminal review (of this review type's anchor classes — RC diffs
-  # against RC/DR/BR, DR/BR against DR/BR) for the project, excluding the current
-  # ship: that ship's own reviews are what's being worked on, not a prior baseline.
+  # The baseline is the most recent time the project was sent back for changes —
+  # a returned or rejected review among this review type's anchor classes (RC diffs
+  # against RC/DR/BR, DR/BR against DR/BR), excluding the current ship. Approvals
+  # after that return do NOT reset it: the diff always shows what the student
+  # changed since they were last asked to fix something. A project never returned/
+  # rejected is a fresh cycle, not a re-ship, so there's no baseline → nil.
   def anchor_review_for(review)
     review.class.repo_diff_anchor_classes.filter_map do |klass|
       klass.joins(:ship)
         .where(ships: { project_id: review.ship.project_id })
         .where.not(ship_id: review.ship_id)
+        .where(status: [ :returned, :rejected ])
         .where.not(completed_at: nil)
         .order(completed_at: :desc)
         .first

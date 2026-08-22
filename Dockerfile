@@ -16,14 +16,13 @@ WORKDIR /rails
 
 # Install base packages — pinned to current Debian 12 (bookworm) stable versions to
 # block unreviewed upgrades; update deliberately when Debian rolls a point release.
-ARG CURL_VERSION=7.88.1-10+deb12u14
+ARG CURL_VERSION=7.88.1-10+deb12u15
 ARG LIBJEMALLOC2_VERSION=5.3.0-1
-ARG LIBVIPS42_VERSION=8.14.1-3+deb12u2
-# Enables PDF rendering through libvips (built with --enable-poppler upstream;
-# the lib is dlopened at runtime so we install it explicitly). Used by
-# ShipChecks::UnifiedScreenshotProcessor when the YSWS Unified upload's source
-# file is a PDF (common for hackathon zines).
-ARG LIBPOPPLER_GLIB8_VERSION=22.12.0-2+deb12u1
+# 8.14.1 satisfies the >= 8.13 floor Active Storage requires to boot (it calls
+# Vips.block_untrusted(true) for CVE-2026-66066). No poppler here on purpose: PDF
+# rendering happens only in the worker image, out of process via pdftoppm, and
+# vips's own pdfload stays blocked in both images.
+ARG LIBVIPS42_VERSION=8.14.1-3+deb12u3
 ARG SQLITE3_VERSION=3.40.1-2+deb12u2
 
 RUN apt-get update -qq && \
@@ -31,7 +30,6 @@ RUN apt-get update -qq && \
       curl="${CURL_VERSION}" \
       libjemalloc2="${LIBJEMALLOC2_VERSION}" \
       libvips42="${LIBVIPS42_VERSION}" \
-      libpoppler-glib8="${LIBPOPPLER_GLIB8_VERSION}" \
       sqlite3="${SQLITE3_VERSION}" \
       wget && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
@@ -58,7 +56,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - && \
 
 # Install application gems
 COPY Gemfile Gemfile.lock ./
-RUN bundle install && \
+# --jobs 1: parallel gem builds race on mkmf's global $stdout/$stderr reopen under
+# the BuildKit builder, failing native extensions with Errno::EBADF. Serialize to avoid it.
+RUN bundle install --jobs 1 && \
     rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
     bundle exec bootsnap precompile --gemfile
 
@@ -85,7 +85,7 @@ RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
 
 
 # Final stage for app image
-FROM base
+FROM base AS app
 
 # Re-declare and re-export so the Ruby Sentry SDK can read it at runtime
 ARG SENTRY_RELEASE=""

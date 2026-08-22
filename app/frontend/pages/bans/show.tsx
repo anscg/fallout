@@ -8,10 +8,15 @@ const GRASS_COUNT = 30
 
 const BAN_MESSAGES: Record<BanType, string> = {
   fallout: 'Your account has been suspended from Fallout.',
+  conduct: 'Your account has been suspended due to a code of conduct violation.',
   hcb: 'Your account has been suspended due to misuse of funds.',
   hardware: 'Your account has been suspended due to a previous violation in another program.',
   age: 'Your account has been suspended because you do not meet the age requirements.',
   hackatime: 'Your account has been suspended due to fraudulent activity in Hackatime.',
+}
+
+const CONTACT_EMAIL: Partial<Record<BanType, string>> = {
+  conduct: 'conduct@hackclub.com',
 }
 
 const DEFAULT_MESSAGE = 'Your account has been suspended from Fallout.'
@@ -19,6 +24,7 @@ const DEFAULT_MESSAGE = 'Your account has been suspended from Fallout.'
 export default function BansShow() {
   const shared = usePage<SharedProps>().props
   const banType = shared.auth.user?.ban_type
+  const contactEmail = (banType && CONTACT_EMAIL[banType]) ?? 'fallout@hackclub.com'
 
   function signOut(e: React.MouseEvent) {
     e.preventDefault()
@@ -32,8 +38,8 @@ export default function BansShow() {
         <p className="text-brown mb-6">
           {banType ? BAN_MESSAGES[banType] : DEFAULT_MESSAGE} If you believe this is a mistake, please reach out to us
           at{' '}
-          <a href="mailto:fallout@hackclub.com" className="underline font-bold">
-            fallout@hackclub.com
+          <a href={`mailto:${contactEmail}`} className="underline font-bold">
+            {contactEmail}
           </a>
           .
         </p>

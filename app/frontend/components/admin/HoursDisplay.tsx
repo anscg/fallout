@@ -14,10 +14,12 @@ function HourValue({ value, label }: { value: number; label: string }) {
 export default function HoursDisplay({
   publicHours,
   internalHours,
+  loggedHours,
   className,
 }: {
   publicHours: number | null
   internalHours: number | null
+  loggedHours?: number | null
   className?: string
 }) {
   if (publicHours == null) return <span className="text-muted-foreground">—</span>
@@ -31,6 +33,11 @@ export default function HoursDisplay({
         <span className="text-muted-foreground ml-1">
           (<HourValue value={publicHours} label="User facing" />)
         </span>
+        {loggedHours != null && (
+          <span className="text-muted-foreground ml-1">
+            / <HourValue value={loggedHours} label="Logged (before changes)" />
+          </span>
+        )}
       </span>
     </TooltipProvider>
   )

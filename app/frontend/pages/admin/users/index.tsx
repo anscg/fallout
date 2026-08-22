@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { router, Link, usePage } from '@inertiajs/react'
+import { router, Link, usePage, Deferred } from '@inertiajs/react'
 import type { ColumnDef } from '@tanstack/react-table'
 import AdminLayout from '@/layouts/AdminLayout'
 import { Badge } from '@/components/admin/ui/badge'
 import { Button } from '@/components/admin/ui/button'
+import { Skeleton } from '@/components/admin/ui/skeleton'
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/admin/ui/input-group'
 import {
   DropdownMenu,
@@ -13,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/admin/ui/dropdown-menu'
 import { DataTable } from '@/components/admin/DataTable'
+import { DataTableSkeleton } from '@/components/admin/DataTableSkeleton'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { SearchIcon, SlidersHorizontalIcon, Loader2 } from 'lucide-react'
 import type { AdminUserRow, PagyProps } from '@/types'
@@ -28,7 +30,7 @@ const baseColumns: ColumnDef<AdminUserRow>[] = [
     header: 'Username',
     cell: ({ row }) => (
       <div className="font-medium">
-        <Link href={`/admin/users/${row.original.id}`} className="text-primary hover:underline">
+        <Link href={`/admin/users/${row.original.id}`} prefetch cacheFor="30s" className="text-primary hover:underline">
           {row.original.display_name}
         </Link>
         {row.original.is_discarded && (
@@ -74,12 +76,12 @@ const emailColumn: ColumnDef<AdminUserRow> = {
 }
 
 interface PageProps {
-  users: AdminUserRow[]
-  pagy: PagyProps
+  users?: AdminUserRow[]
+  pagy?: PagyProps
   query: string
   include_trial: boolean
   include_deleted: boolean
-  total_count: number
+  total_count?: number
 }
 
 export default function AdminUsersIndex({
@@ -172,7 +174,7 @@ export default function AdminUsersIndex({
       <div className="flex items-center gap-2 mb-4">
         <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
         <Badge variant="secondary" className="text-sm">
-          {total_count}
+          {total_count ?? <Skeleton className="h-4 w-8" />}
         </Badge>
       </div>
 
@@ -216,7 +218,9 @@ export default function AdminUsersIndex({
         </div>
       </div>
 
-      <DataTable columns={columns} data={users} pagy={pagy} noun="users" />
+      <Deferred data={['users', 'pagy']} fallback={<DataTableSkeleton columns={columns.length} />}>
+        <DataTable columns={columns} data={users ?? []} pagy={pagy} noun="users" />
+      </Deferred>
     </div>
   )
 }

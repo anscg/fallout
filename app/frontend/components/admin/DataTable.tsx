@@ -24,7 +24,8 @@ interface DataTableProps<TData, TValue> {
 function goToPage(pageNum: number, param = 'page') {
   const url = new URL(window.location.href)
   url.searchParams.set(param, String(pageNum))
-  router.get(url.pathname + url.search, {}, { preserveState: true })
+  // preserveScroll so paging a long list doesn't jump back to the top of the page
+  router.get(url.pathname + url.search, {}, { preserveState: true, preserveScroll: true })
 }
 
 function PagyInfo({ pagy, noun = 'results' }: { pagy: PagyProps; noun?: string }) {

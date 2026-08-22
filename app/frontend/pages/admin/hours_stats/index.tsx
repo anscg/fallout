@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { router } from '@inertiajs/react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown } from 'lucide-react'
 import AdminLayout from '@/layouts/AdminLayout'
 import { Button } from '@/components/admin/ui/button'
 import { Badge } from '@/components/admin/ui/badge'
@@ -29,12 +29,18 @@ export default function AdminHoursStatsIndex({ buckets, computed_at, mode }: Pro
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState<string | null>(null)
 
+  const allCollapsed = buckets.length > 0 && buckets.every((b) => collapsed.has(b.range))
+
   function toggleCollapsed(range: string) {
     setCollapsed((prev) => {
       const next = new Set(prev)
       next.has(range) ? next.delete(range) : next.add(range)
       return next
     })
+  }
+
+  function toggleAll() {
+    setCollapsed(allCollapsed ? new Set() : new Set(buckets.map((b) => b.range)))
   }
 
   function copy(text: string, key: string) {
@@ -61,6 +67,10 @@ export default function AdminHoursStatsIndex({ buckets, computed_at, mode }: Pro
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={toggleAll} disabled={buckets.length === 0}>
+            {allCollapsed ? <ChevronsUpDown data-icon="inline-start" /> : <ChevronsDownUp data-icon="inline-start" />}
+            {allCollapsed ? 'Expand all' : 'Collapse all'}
+          </Button>
           <div className="flex rounded-md border border-border overflow-hidden text-sm">
             <button
               onClick={() => switchMode('logged')}

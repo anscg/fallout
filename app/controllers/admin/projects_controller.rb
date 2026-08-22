@@ -2,41 +2,17 @@ class Admin::ProjectsController < Admin::ApplicationController
   before_action :require_admin!, except: :show # Mutations require full admin; show is staff-accessible
 
   def index
-    base_scope = policy_scope(Project).includes(:user)
-    base_scope = base_scope.kept unless params[:include_deleted] == "1"
-    base_scope = base_scope.where(is_unlisted: false) if params[:hide_unlisted] == "1"
-    base_scope = base_scope.where("EXISTS (SELECT 1 FROM journal_entries WHERE journal_entries.project_id = projects.id AND journal_entries.discarded_at IS NULL)") if params[:with_journals] == "1"
-    search_scope = base_scope
-    if params[:query].present?
-      # Meilisearch returns a relevance-ordered list of IDs. Re-apply via a positional
-      # ORDER to preserve relevance — keeps typo-tolerant / partial-word matches at the
-      # top instead of sinking to the bottom under created_at desc.
-      ranked_ids = Project.ms_search(params[:query], limit: 200).map(&:id)
-      if ranked_ids.any?
-        order_sql = ActiveRecord::Base.send(:sanitize_sql_array, [ "array_position(ARRAY[?]::bigint[], projects.id)", ranked_ids ])
-        search_scope = search_scope.where(id: ranked_ids).reorder(Arel.sql(order_sql))
-      else
-        search_scope = search_scope.none
-      end
-      @pagy, @projects = pagy(search_scope)
-    else
-      @pagy, @projects = pagy(search_scope.order(created_at: :desc))
-    end
-    project_ids = @projects.map(&:id)
-    @entry_counts = JournalEntry.where(project_id: project_ids, discarded_at: nil).group(:project_id).count
-    @last_entries = JournalEntry.where(project_id: project_ids, discarded_at: nil).group(:project_id).maximum(:created_at)
-    @hours_tracked = Project.batch_time_logged(project_ids)
-    @featured_project_ids = FeaturedProject.kept.where(project_id: project_ids).pluck(:project_id).to_set
-
+    # policy_scope runs on the critical path so verify_policy_scoped passes on the initial
+    # (deferred) render; it's lazy, so no query fires until the deferred loader enumerates it.
+    scope = policy_scope(Project)
+    # Filter chrome renders instantly; the heavy query + serialization is deferred so the
+    # page shell appears immediately and the table shows a skeleton until data lands.
     render inertia: {
-      projects: @projects.map { |p| serialize_project_row(p) },
-      pagy: pagy_props(@pagy),
       query: params[:query].to_s,
       include_deleted: params[:include_deleted] == "1",
       hide_unlisted: params[:hide_unlisted] == "1",
       with_journals: params[:with_journals] == "1",
-      # Without a search, pagy already counted base_scope — reuse it instead of a second COUNT.
-      total_count: params[:query].present? ? base_scope.count : @pagy.count
+      **deferred_index_props(scope)
     }
   end
 
@@ -66,6 +42,8 @@ class Admin::ProjectsController < Admin::ApplicationController
       pagy_entries: pagy_props(@pagy_entries)
     }
     props[:audit_log] = InertiaRails.defer { serialize_audit_log(@project) } if current_user.admin? # Audit log — admin-only
+    # Share links are admin-only: listing them would hand every staff member every secret URL.
+    props[:time_audit_sessions] = serialize_time_audit_sessions(@project) if current_user.admin?
     render inertia: props
   end
 
@@ -99,6 +77,41 @@ class Admin::ProjectsController < Admin::ApplicationController
 
   private
 
+  # Memoized loader shared by the deferred index props so the heavy query runs once per
+  # deferred request even though projects/pagy/total_count are separate Inertia props.
+  def deferred_index_props(scope)
+    memo = nil
+    load = lambda do
+      memo ||= begin
+        base_scope = scope.includes(:user)
+        base_scope = base_scope.kept unless params[:include_deleted] == "1"
+        base_scope = base_scope.where(is_unlisted: false) if params[:hide_unlisted] == "1"
+        base_scope = base_scope.where("EXISTS (SELECT 1 FROM journal_entries WHERE journal_entries.project_id = projects.id AND journal_entries.discarded_at IS NULL)") if params[:with_journals] == "1"
+        search_scope = base_scope
+        if params[:query].present?
+          search_scope = admin_search(search_scope, params[:query])
+          @pagy, @projects = pagy(search_scope.order(created_at: :desc))
+          total = base_scope.count
+        else
+          @pagy, @projects = pagy(search_scope.order(created_at: :desc))
+          # Without a search, pagy already counted base_scope — reuse it instead of a second COUNT.
+          total = @pagy.count
+        end
+        project_ids = @projects.map(&:id)
+        @entry_counts = JournalEntry.where(project_id: project_ids, discarded_at: nil).group(:project_id).count
+        @last_entries = JournalEntry.where(project_id: project_ids, discarded_at: nil).group(:project_id).maximum(:created_at)
+        @hours_tracked = Project.batch_time_logged(project_ids)
+        @featured_project_ids = FeaturedProject.kept.where(project_id: project_ids).pluck(:project_id).to_set
+        { projects: @projects.map { |p| serialize_project_row(p) }, pagy: pagy_props(@pagy), total_count: total }
+      end
+    end
+    {
+      projects: InertiaRails.defer(group: "index") { load.call[:projects] },
+      pagy: InertiaRails.defer(group: "index") { load.call[:pagy] },
+      total_count: InertiaRails.defer(group: "index") { load.call[:total_count] }
+    }
+  end
+
   def serialize_project_row(project)
     {
       id: project.id,
@@ -114,6 +127,22 @@ class Admin::ProjectsController < Admin::ApplicationController
       is_featured: @featured_project_ids&.include?(project.id) || false,
       created_at: project.created_at.strftime("%b %d, %Y")
     }
+  end
+
+  def serialize_time_audit_sessions(project)
+    policy_scope(project.project_time_audits.recent.includes(:created_by, :last_edited_by)).map do |audit|
+      {
+        token: audit.token,
+        label: audit.label,
+        path: admin_project_time_audit_path(audit),
+        share_url: admin_project_time_audit_url(audit),
+        created_by_display_name: audit.created_by.display_name,
+        last_edited_by_display_name: audit.last_edited_by&.display_name,
+        computed_hours: audit.computed_hours,
+        saved_at: audit.saved_at&.strftime("%b %d, %Y"),
+        created_at: audit.created_at.strftime("%b %d, %Y")
+      }
+    end
   end
 
   def serialize_project_detail(project)
@@ -199,8 +228,10 @@ class Admin::ProjectsController < Admin::ApplicationController
   end
 
   def compute_removed_seconds(segments, recording: nil, rec_data: {})
-    # YouTube stretch_multiplier lets reviewers treat a YT video as a timelapse (e.g. ×60)
-    multiplier = recording&.recordable.is_a?(YouTubeVideo) ? (rec_data["stretch_multiplier"]&.to_f || 1.0) : 60.0
+    # Only UNprocessed YouTube uses the reviewer's stretch_multiplier; a processed YouTube video is a
+    # real 60× timelapse and deducts like Lapse/Lookout (segments are in timelapse-video seconds).
+    raw_youtube = recording&.recordable.is_a?(YouTubeVideo) && !recording.recordable.timelapse_ready?
+    multiplier = raw_youtube ? (rec_data["stretch_multiplier"]&.to_f || 1.0) : 60.0
     segments.sum do |seg|
       video_range = seg["end_seconds"].to_f - seg["start_seconds"].to_f
       real_range = video_range * multiplier
@@ -253,8 +284,10 @@ class Admin::ProjectsController < Admin::ApplicationController
     return unless current_user.admin?
 
     recordable = recording.recordable
-    return unless recordable.is_a?(LapseTimelapse) || recordable.is_a?(LookoutTimelapse)
+    return recordable.playback_url.presence if recordable.is_a?(LapseTimelapse) || recordable.is_a?(LookoutTimelapse)
+    # A processed YouTube video plays from its archived 60× timelapse via a presigned R2 URL.
+    return YouTubeTimelapseService.new.presigned_playback_url(recordable) if recordable.is_a?(YouTubeVideo) && recordable.timelapse_ready?
 
-    recordable.playback_url.presence
+    nil
   end
 end

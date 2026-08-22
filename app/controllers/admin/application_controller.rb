@@ -34,6 +34,8 @@ class Admin::ApplicationController < ApplicationController
       pending_requirements_checks_count: RequirementsCheckReview.pending.async_count,
       pending_design_reviews_count: DesignReview.pending.async_count,
       pending_build_reviews_count: BuildReview.pending.async_count,
+      pending_design_review_backfills_count: DesignReview.approved.where("internal_reason IS NULL OR internal_reason = ''").async_count,
+      pending_build_review_backfills_count: BuildReview.approved.where("internal_reason IS NULL OR internal_reason = ''").async_count,
       flagged_projects_count: ProjectFlag.distinct.async_count(:project_id)
     }
     promises.transform_values(&:value)
@@ -47,6 +49,17 @@ class Admin::ApplicationController < ApplicationController
 
   def require_admin!
     raise ActionController::RoutingError, "Not Found" unless current_user&.admin?
+  end
+
+  # Admin search runs through scoped_search: free text matches every declared field, and
+  # admins can narrow with the query language (`role = admin`, `owner ~ ada`, `id = 12`).
+  # scoped_search parses eagerly and raises on a query it can't compile (bad operator for
+  # the field type, dangling operator), which for half-typed input would surface as a 500 —
+  # degrade to the model's pg_search scope instead.
+  def admin_search(scope, query)
+    scope.search_for(query)
+  rescue ScopedSearch::QueryNotSupported
+    scope.search(query)
   end
 
   CENSORED_FIELD_PATTERNS = %w[secret token key password encrypted].freeze

@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp, Minus } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/admin/ui/tooltip'
+import { Skeleton } from '@/components/admin/ui/skeleton'
 
 export type ReviewStatKey = 'hours_pending' | 'turnaround' | 'approval_ratio' | 'reship_ratio'
 
@@ -59,15 +60,36 @@ function fmtPct(p: number | null) {
   return p == null ? '—' : `${p.toFixed(0)}%`
 }
 
-// Each card renderer accepts the (possibly undefined) stat slice and falls back
-// to "—". The skeleton state reuses the same card structure so no CLS when the
-// deferred payload lands — only the inner text swaps.
+const CARD_META: Record<ReviewStatKey, { label: string; description: string }> = {
+  hours_pending: { label: 'Hours pending review', description: 'approved hours waiting in this queue' },
+  turnaround: { label: 'P90 Turnaround (3d)', description: '90th-pct wait, includes pending backlog' },
+  approval_ratio: { label: 'Approval ratio (3d)', description: 'percentage of ships that get approved' },
+  reship_ratio: {
+    label: 'Reship ratio (3d)',
+    description: 'ships that are re-attempts after a returned/rejected ship',
+  },
+}
+
+// Each card renderer accepts the (possibly undefined) stat slice. While the deferred `stats`
+// payload is still loading (`stats === undefined`) the value slot shows a skeleton sized to the
+// text-2xl line, so the card structure is identical before/after the payload lands (no CLS).
+// Once loaded, an individual null value renders "—".
 function renderCard(key: ReviewStatKey, stats?: ReviewStats, slaDays?: number) {
+  if (stats === undefined) {
+    // inline-block so the value wrapper's text-2xl line-height (32px) governs the row height —
+    // a block skeleton's margins would collapse through the padding-less wrapper and under-size it.
+    return (
+      <StatCard key={key} {...CARD_META[key]}>
+        <Skeleton className="inline-block h-5 w-24 align-middle" />
+      </StatCard>
+    )
+  }
+
   switch (key) {
     case 'hours_pending': {
       const v = stats?.hours_pending?.value
       return (
-        <StatCard key={key} label="Hours pending review" description="approved hours waiting in this queue">
+        <StatCard key={key} {...CARD_META[key]}>
           {v == null ? '—' : `${v.toFixed(1)}h`}
         </StatCard>
       )
@@ -77,7 +99,7 @@ function renderCard(key: ReviewStatKey, stats?: ReviewStats, slaDays?: number) {
       // Red once the P90 wait reaches the queue's SLA (breach).
       const breached = slaDays != null && t?.ship_days != null && t.ship_days >= slaDays
       return (
-        <StatCard key={key} label="P90 Turnaround (3d)" description="90th-pct wait, includes pending backlog">
+        <StatCard key={key} {...CARD_META[key]}>
           <TooltipProvider>
             <span className={breached ? 'text-red-700 dark:text-red-400' : undefined}>
               <Tooltip>
@@ -108,7 +130,7 @@ function renderCard(key: ReviewStatKey, stats?: ReviewStats, slaDays?: number) {
     case 'approval_ratio': {
       const a = stats?.approval_ratio
       return (
-        <StatCard key={key} label="Approval ratio (3d)" description="percentage of ships that get approved">
+        <StatCard key={key} {...CARD_META[key]}>
           <span>{fmtPct(a?.percent ?? null)}</span>
           {a && (
             <span className="text-muted-foreground text-sm font-normal ml-2">
@@ -126,11 +148,7 @@ function renderCard(key: ReviewStatKey, stats?: ReviewStats, slaDays?: number) {
     case 'reship_ratio': {
       const r = stats?.reship_ratio
       return (
-        <StatCard
-          key={key}
-          label="Reship ratio (3d)"
-          description="ships that are re-attempts after a returned/rejected ship"
-        >
+        <StatCard key={key} {...CARD_META[key]}>
           <span>{fmtPct(r?.percent ?? null)}</span>
           {r && (
             <span className="text-muted-foreground text-sm font-normal ml-2">

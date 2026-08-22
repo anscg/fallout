@@ -32,6 +32,7 @@ import {
   BarChart2,
   BadgeAlert,
   Ticket,
+  Scale,
 } from 'lucide-react'
 
 interface AdminStats {
@@ -42,6 +43,8 @@ interface AdminStats {
   pending_requirements_checks_count: number
   pending_design_reviews_count: number
   pending_build_reviews_count: number
+  pending_design_review_backfills_count: number
+  pending_build_review_backfills_count: number
   flagged_projects_count: number
 }
 
@@ -120,6 +123,20 @@ function buildNavSections(): { items: NavItem[] }[] {
           requirePermission: 'can_review_build_reviews',
         },
         {
+          label: 'DR Backfill',
+          href: '/admin/reviews/design_review_backfills',
+          icon: Compass,
+          statKey: 'pending_design_review_backfills_count',
+          requirePermission: 'can_review_design_reviews',
+        },
+        {
+          label: 'BR Backfill',
+          href: '/admin/reviews/build_review_backfills',
+          icon: Hammer,
+          statKey: 'pending_build_review_backfills_count',
+          requirePermission: 'can_review_build_reviews',
+        },
+        {
           label: 'My Reviews',
           href: '/admin/reviews/mine',
           icon: History,
@@ -168,6 +185,15 @@ function buildNavSections(): { items: NavItem[] }[] {
           label: 'Tickets',
           href: '/admin/ticket_claims',
           icon: Ticket,
+          statKey: null,
+          requirePermission: 'is_admin',
+        },
+        {
+          // Debtors are computed from approved-ticket holders' hours — too expensive for a deferred
+          // sidebar pill on every page, so no statKey.
+          label: 'Debt',
+          href: '/admin/debt',
+          icon: Scale,
           statKey: null,
           requirePermission: 'is_admin',
         },
@@ -234,7 +260,10 @@ function renderNavItem(item: NavItem, pathname: string, collapsed: boolean, admi
   const isActive = pathname === item.href || (item.href !== '/admin' && pathname.startsWith(item.href))
   const Icon = item.icon
   const Component = item.external ? 'a' : Link
-  const linkProps = item.external ? { href: item.href, target: '_self' as const } : { href: item.href }
+  // Hover-prefetch internal pages so the click swaps instantly even on slow connections.
+  const linkProps = item.external
+    ? { href: item.href, target: '_self' as const }
+    : { href: item.href, prefetch: true as const, cacheFor: '30s' }
   const stat = item.statKey && admin_stats ? admin_stats[item.statKey] : null
 
   return (

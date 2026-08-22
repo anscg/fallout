@@ -40,11 +40,11 @@ class Api::V1::UsersController < Api::V1::BaseController
   def batch_koi(user_ids)
     {
       earned: KoiTransaction.where(user_id: user_ids).group(:user_id).sum(:amount),
-      spent_shop: ShopOrder.joins(:shop_item)
-        .where(user_id: user_ids, shop_items: { currency: "koi" })
+      spent_shop: ShopOrder
+        .where(user_id: user_ids)
         .where.not(state: :rejected)
         .group(:user_id)
-        .sum("frozen_price * quantity"),
+        .sum(:frozen_koi_amount),
       spent_grants: ProjectGrantOrder.kept
         .where(user_id: user_ids)
         .where.not(state: :rejected)

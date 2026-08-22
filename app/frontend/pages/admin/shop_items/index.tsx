@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { router, Link } from '@inertiajs/react'
 import { Search, Plus, ChevronRight, ImageOff, Store, X } from 'lucide-react'
 import AdminLayout from '@/layouts/AdminLayout'
@@ -20,18 +20,8 @@ import {
 } from '@/components/admin/shop/shopItem'
 
 type Stats = { total: number; available: number; unavailable: number; featured: number }
-type Filters = { q?: string; status?: string; currency?: string; featured?: string }
 
 const ALL = '__all__'
-
-function applyFilters(next: Filters) {
-  const params: Record<string, string> = {}
-  if (next.q) params.q = next.q
-  if (next.status) params.status = next.status
-  if (next.currency) params.currency = next.currency
-  if (next.featured) params.featured = next.featured
-  router.get('/admin/shop_items', params, { preserveState: true, preserveScroll: true, replace: true })
-}
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
@@ -42,28 +32,32 @@ function Stat({ label, value }: { label: string; value: number }) {
   )
 }
 
-export default function AdminShopItemsIndex({
-  shop_items,
-  stats,
-  filters,
-}: {
-  shop_items: ShopItem[]
-  stats: Stats
-  filters: Filters
-}) {
-  const [q, setQ] = useState(filters.q ?? '')
-  const firstRender = useRef(true)
-  const hasFilters = !!(filters.q || filters.status || filters.currency || filters.featured)
+export default function AdminShopItemsIndex({ shop_items, stats }: { shop_items: ShopItem[]; stats: Stats }) {
+  const [q, setQ] = useState('')
+  const [status, setStatus] = useState('')
+  const [currency, setCurrency] = useState('')
+  const [featured, setFeatured] = useState('')
+  const hasFilters = !!(q || status || currency || featured)
 
-  // Debounce the free-text search; selects apply immediately.
-  useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false
-      return
-    }
-    const t = setTimeout(() => applyFilters({ ...filters, q }), 300)
-    return () => clearTimeout(t)
-  }, [q])
+  const needle = q.trim().toLowerCase()
+  const filtered = useMemo(
+    () =>
+      shop_items.filter((item) => {
+        if (needle && !`${item.name ?? ''} ${item.description ?? ''}`.toLowerCase().includes(needle)) return false
+        if (status && item.status !== status) return false
+        if (currency && item.currency !== currency) return false
+        if (featured && String(item.featured) !== featured) return false
+        return true
+      }),
+    [shop_items, needle, status, currency, featured],
+  )
+
+  function clearFilters() {
+    setQ('')
+    setStatus('')
+    setCurrency('')
+    setFeatured('')
+  }
 
   return (
     <div className="space-y-6">
@@ -97,10 +91,7 @@ export default function AdminShopItemsIndex({
             className="pl-9"
           />
         </div>
-        <Select
-          value={filters.status || ALL}
-          onValueChange={(v) => applyFilters({ ...filters, status: v === ALL ? '' : v })}
-        >
+        <Select value={status || ALL} onValueChange={(v) => setStatus(v === ALL ? '' : v)}>
           <SelectTrigger className="w-40">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
@@ -110,10 +101,7 @@ export default function AdminShopItemsIndex({
             <SelectItem value="unavailable">Unavailable</SelectItem>
           </SelectContent>
         </Select>
-        <Select
-          value={filters.currency || ALL}
-          onValueChange={(v) => applyFilters({ ...filters, currency: v === ALL ? '' : v })}
-        >
+        <Select value={currency || ALL} onValueChange={(v) => setCurrency(v === ALL ? '' : v)}>
           <SelectTrigger className="w-36">
             <SelectValue placeholder="Currency" />
           </SelectTrigger>
@@ -126,10 +114,7 @@ export default function AdminShopItemsIndex({
             ))}
           </SelectContent>
         </Select>
-        <Select
-          value={filters.featured || ALL}
-          onValueChange={(v) => applyFilters({ ...filters, featured: v === ALL ? '' : v })}
-        >
+        <Select value={featured || ALL} onValueChange={(v) => setFeatured(v === ALL ? '' : v)}>
           <SelectTrigger className="w-40">
             <SelectValue placeholder="Featured" />
           </SelectTrigger>
@@ -140,13 +125,7 @@ export default function AdminShopItemsIndex({
           </SelectContent>
         </Select>
         {hasFilters && (
-          <Button
-            variant="ghost"
-            onClick={() => {
-              setQ('')
-              applyFilters({})
-            }}
-          >
+          <Button variant="ghost" onClick={clearFilters}>
             <X className="size-4" />
             Clear
           </Button>
@@ -167,7 +146,7 @@ export default function AdminShopItemsIndex({
           </TableHeader>
           <TableBody>
             <TooltipProvider delayDuration={150}>
-              {shop_items.map((item) => (
+              {filtered.map((item) => (
                 <TableRow
                   key={item.id}
                   onClick={() => router.visit(`/admin/shop_items/${item.id}/edit`)}
@@ -231,7 +210,7 @@ export default function AdminShopItemsIndex({
               ))}
             </TooltipProvider>
 
-            {shop_items.length === 0 && (
+            {filtered.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={6} className="py-16">
                   <div className="flex flex-col items-center gap-3 text-center">
@@ -241,14 +220,7 @@ export default function AdminShopItemsIndex({
                     {hasFilters ? (
                       <>
                         <p className="font-medium">No items match these filters</p>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setQ('')
-                            applyFilters({})
-                          }}
-                        >
+                        <Button variant="outline" size="sm" onClick={clearFilters}>
                           Clear filters
                         </Button>
                       </>
@@ -274,9 +246,9 @@ export default function AdminShopItemsIndex({
         </Table>
       </div>
 
-      {shop_items.length > 0 && (
+      {filtered.length > 0 && (
         <p className="text-xs text-muted-foreground">
-          {shop_items.length} item{shop_items.length === 1 ? '' : 's'} shown
+          {filtered.length} item{filtered.length === 1 ? '' : 's'} shown
           {hasFilters && ` of ${stats.total} total`}
         </p>
       )}

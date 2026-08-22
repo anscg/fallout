@@ -23,7 +23,7 @@ export function buildPendingColumns(
       accessorKey: 'project_name',
       header: 'Project',
       cell: ({ row }) => (
-        <Link href={`${basePath}/${row.original.id}`} className="font-medium hover:underline">
+        <Link href={`${basePath}/${row.original.id}`} prefetch cacheFor="30s" className="font-medium hover:underline">
           {row.original.project_name}
         </Link>
       ),
@@ -87,7 +87,12 @@ export function buildAllColumns(
         if (row.original.project_flagged && !isAdmin)
           return <span className="text-muted-foreground">{row.original.id}</span>
         return (
-          <Link href={`${basePath}/${row.original.id}`} className="text-muted-foreground hover:underline">
+          <Link
+            href={`${basePath}/${row.original.id}`}
+            prefetch
+            cacheFor="30s"
+            className="text-muted-foreground hover:underline"
+          >
             {row.original.id}
           </Link>
         )

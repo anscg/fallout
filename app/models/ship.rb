@@ -48,7 +48,9 @@ class Ship < ApplicationRecord
   has_many :reviewer_notes, dependent: :nullify
   has_many :project_flags, dependent: :nullify
 
-  enum :status, { pending: 0, approved: 1, returned: 2, rejected: 3, awaiting_identity: 4 }
+  # superseded: a still-pending ship the user pulled out of the queue via re-ship.
+  # Terminal, currency-neutral, and notification-silent — see #supersede!.
+  enum :status, { pending: 0, approved: 1, returned: 2, rejected: 3, awaiting_identity: 4, superseded: 5 }
   enum :ship_type, { design: 0, build: 1 }, prefix: true
 
   serialize :frozen_hca_data, coder: JSON
@@ -271,7 +273,13 @@ class Ship < ApplicationRecord
 
   def new_journal_entries
     cutoff = previous_approved_ship&.created_at || Time.at(0)
-    project.journal_entries.kept.where("journal_entries.created_at > ?", cutoff)
+    scope = project.journal_entries.kept.where("journal_entries.created_at > ?", cutoff)
+    # Exclude entries locked to a *different approved* ship — that cycle is finalized, so a
+    # later ship whose created_at window overlaps the review lag must not re-count its
+    # hours/koi. Entries owned by returned/rejected ships stay visible so a re-ship reclaims
+    # them. Mirrors the claim_journal_entries! filter, which the compute path previously lacked.
+    locked_ids = project.ships.approved.where.not(id: id).pluck(:id)
+    locked_ids.any? ? scope.where("journal_entries.ship_id IS NULL OR journal_entries.ship_id NOT IN (?)", locked_ids) : scope
   end
 
   def previous_journal_entries
@@ -350,7 +358,30 @@ class Ship < ApplicationRecord
     end
   end
 
+  # Pull a still-pending ship out of the review queue so the user can re-ship it.
+  # Cancels its pending reviews (removing them from reviewer queues) and marks the ship
+  # :superseded — a terminal state that never awards currency or notifies the user.
+  # The fresh ship is created separately by the controller (no preflight, bottom of queue).
+  # Returns true if it superseded the ship, false if a reviewer concurrently finalized it
+  # (so it's no longer pending and there's nothing to pull back) — callers skip creating the
+  # replacement in that case.
+  def supersede!
+    superseded = false
+    with_lock do
+      # Re-check under the row lock: a reviewer may have returned/approved/rejected between
+      # selection and now. with_lock reloads self and resets the association cache, so both the
+      # ship status and per-review states read fresh. Bail without raising if no longer pending.
+      next unless pending?
+
+      cancel_pending_reviews! # leaves the queue; each review skips ship recompute
+      update!(status: :superseded)
+      superseded = true
+    end
+    superseded
+  end
+
   def recompute_status!
+    return if superseded? # Terminal — derive_status can't represent it; never recompute back to pending
     new_status = derive_status
     if status != new_status
       attrs = { status: new_status }
@@ -372,6 +403,9 @@ class Ship < ApplicationRecord
         attrs[:approved_public_seconds] = nil
       end
       update!(attrs)
+      # Lock every entry this ship's TA reviewed onto the ship so a later cycle can't re-claim
+      # and re-count them through its (unbounded) created_at window — see new_journal_entries.
+      lock_reviewed_journal_entries! if new_status == "approved"
     end
     cancel_pending_reviews! if returned? || rejected?
   end
@@ -474,7 +508,14 @@ class Ship < ApplicationRecord
     scope.update_all(ship_id: id)
   end
 
-  TERMINAL_STATUSES = %w[approved returned rejected].freeze
+  # Claim every still-unclaimed entry this ship's TA reviewed (the review-lag entries logged
+  # after submission). Called on the :approved transition to finalize this cycle's set so the
+  # next ship excludes them — see new_journal_entries.
+  def lock_reviewed_journal_entries!
+    new_journal_entries.where(ship_id: nil).update_all(ship_id: id)
+  end
+
+  TERMINAL_STATUSES = %w[approved returned rejected superseded].freeze
 
   # Prevent admin from bypassing the review pipeline by directly changing a terminal ship status
   def status_transition_allowed
@@ -559,16 +600,20 @@ class Ship < ApplicationRecord
     new_journal_entries.includes(recordings: :recordable).each do |entry|
       entry.recordings.each do |rec|
         rec_annotations = annotations.dig("recordings", rec.id.to_s) || {}
-        # YouTube stretch_multiplier lets reviewers treat a YT video as a timelapse (e.g. ×60)
-        multiplier = rec.recordable.is_a?(YouTubeVideo) ? (rec_annotations["stretch_multiplier"]&.to_f || 1.0) : 60.0
+        # A processed YouTube video is a real 60× timelapse — bill it exactly like Lapse/Lookout
+        # (segments ×60, duration already real seconds). Only an UNprocessed YouTube video uses the
+        # reviewer-set stretch_multiplier against its real-time iframe footage.
+        raw_youtube = rec.recordable.is_a?(YouTubeVideo) && !rec.recordable.timelapse_ready?
+        multiplier = raw_youtube ? (rec_annotations["stretch_multiplier"]&.to_f || 1.0) : 60.0
         raw_duration =
           case rec.recordable
           when LookoutTimelapse, LapseTimelapse then rec.recordable.duration.to_i
           when YouTubeVideo                     then rec.recordable.duration_seconds.to_i
           else 0
           end
-        # For YouTube, base is raw video seconds * stretch_multiplier. For timelapse, duration is already in real seconds.
-        base_duration = rec.recordable.is_a?(YouTubeVideo) ? raw_duration * multiplier : raw_duration
+        # Unprocessed YouTube base = raw video seconds × stretch_multiplier. Timelapse footage
+        # (Lapse, Lookout, processed YouTube) already stores duration in real seconds.
+        base_duration = raw_youtube ? raw_duration * multiplier : raw_duration
         total += base_duration
         segments = rec_annotations["segments"] || []
         segments.each do |seg|
@@ -601,6 +646,7 @@ class Ship < ApplicationRecord
   # Idempotency is enforced per member by partial unique indexes; failures are logged
   # but do NOT roll back the approval — operators reconcile via the rake task.
   def award_ship_review_currency!
+    return unless approved? # Awarders no-op for other statuses; skip the preload query entirely (e.g. on supersede)
     ship = Ship.includes(project: { user: {}, collaborators: :user }).find(id) # preload to avoid N+1
 
     if ship_type_design?

@@ -35,10 +35,12 @@ function LookoutSessionShow({
   lookout_session,
   lookout_api_url,
   return_to,
+  desktop,
 }: {
   lookout_session: LookoutSessionProps
   lookout_api_url: string | null
   return_to: string | null
+  desktop: boolean
 }) {
   const endedStatuses = ['stopped', 'compiling', 'complete', 'failed']
   const continuableStatuses = ['active', 'paused']
@@ -48,6 +50,9 @@ function LookoutSessionShow({
   const [mode, setMode] = useState<Mode>(() => {
     log('session', `loaded session status=${lookout_session.status}, api=${lookout_api_url}`)
     if (endedStatuses.includes(lookout_session.status)) return 'browser'
+
+    // Opened from the Lookout desktop app (?desktop=true): skip the chooser and go straight to desktop mode
+    if (desktop) return 'desktop'
 
     const savedMode = new URLSearchParams(window.location.search).get('mode')
     if (
@@ -60,6 +65,15 @@ function LookoutSessionShow({
 
     return 'choose'
   })
+
+  // Auto-bounce back into the Lookout app via deep link when launched with ?desktop=true
+  useEffect(() => {
+    if (mode === 'desktop' && desktop) {
+      log('session', 'desktop=true, opening lookout:// deep link')
+      window.location.href = `lookout://session?token=${lookout_session.token}`
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function selectMode(next: 'browser' | 'camera' | 'desktop') {
     const url = new URL(window.location.href)

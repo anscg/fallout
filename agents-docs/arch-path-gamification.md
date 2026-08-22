@@ -102,9 +102,9 @@ Gallery view at `/clearing` showing all the user's critters (`policy_scope(Critt
 Implemented as a ledger. See [arch-ship-and-koi.md](arch-ship-and-koi.md) for the full model. Quick reference:
 
 - `KoiTransaction` (readonly, `REASONS = ship_review | built_irl_conversion | admin_adjustment | streak_goal`; `SHIP_REASONS = ship_review | built_irl_conversion` require a `ship_id`) and parallel `GoldTransaction` (`REASONS = ship_review | built_irl_conversion | admin_adjustment`).
-- `User#koi` = `koi_transactions.sum(:amount)` MINUS koi-currency shop_orders (non-rejected) MINUS project_grant_orders (kept, non-rejected). Trials hardcoded to 0. `User#gold` is computed identically against `GoldTransaction` and gold-currency spend (`frozen_gold_amount` for grants) — both balances are recomputed live from their ledgers; there is no denormalized counter.
+- `User#koi` = `koi_transactions.sum(:amount)` MINUS `frozen_koi_amount` of non-rejected shop_orders MINUS `frozen_koi_amount` of kept, non-rejected project_grant_orders. Trials hardcoded to 0. `User#gold` is computed identically against `GoldTransaction` and `frozen_gold_amount` — both balances are recomputed live from their ledgers; there is no denormalized counter. Both shop orders and grants store a koi-first cost split (koi spent before gold; gold can pay for koi-currency items but not vice-versa).
 - Reasons are wired: `streak_goal` (StreakService), `admin_adjustment` (Admin::KoiTransactionsController), `ship_review` / `built_irl_conversion` (Ship's after_update_commit → awarder service). See arch-ship-and-koi.md §10 for the awarding formula and the layered safeguards (DB partial unique index, model invariant, reconciliation rake task).
-- Spending paths: `ShopOrder` (frozen_price, currency koi/gold/hours), `ProjectGrantOrder` (koi → USD via HcbGrantSetting for HCB project funding cards). Both use frozen amounts and exclude `rejected` from the deduction (so `fulfilled→rejected` refunds).
+- Spending paths: `ShopOrder` (frozen_price + koi-first `frozen_koi_amount`/`frozen_gold_amount` split, item currency koi/gold/hours), `ProjectGrantOrder` (koi → USD via HcbGrantSetting for HCB project funding cards). Both use frozen amounts and exclude `rejected` from the deduction (so `fulfilled→rejected` refunds).
 
 ## Admin Review Workflow
 
